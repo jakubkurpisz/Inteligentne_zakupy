@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm config set strict-ssl false)",
+      "Bash(npm install)",
+      "Read(//c/Users/www.funpc.pl/AppData/Local/npm-cache/_logs/**)",
+      "Bash(where yarn)",
+      "Bash(yarn install)",
+      "Bash(yarn dev)",
+      "Bash(del yarn.lock)",
+      "Bash(npm run dev)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

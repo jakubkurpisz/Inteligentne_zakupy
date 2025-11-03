@@ -1,0 +1,34 @@
+╔══════════════════════════════════════════════════════════════╗
+║                 INTELIGENTNE ZAKUPY - SZYBKI START           ║
+╚══════════════════════════════════════════════════════════════╝
+
+📌 STAŁE PORTY:
+   • Backend:  Port 3002
+   • Frontend: Port 5173
+
+🚀 JAK URUCHOMIĆ:
+   1. Kliknij dwukrotnie: START.bat
+   2. Poczekaj aż otworzą się 2 okna (backend i frontend)
+   3. Otwórz przeglądarkę: http://localhost:5173
+
+🛑 JAK ZATRZYMAĆ:
+   Kliknij dwukrotnie: STOP.bat
+
+📱 DOSTĘP Z TELEFONU/TABLETU (ta sama sieć WiFi):
+   http://10.101.101.137:5173
+
+🔧 JEŚLI PORTY SĄ ZAJĘTE:
+   Skrypt START.bat automatycznie je oczyści!
+
+📖 PEŁNA DOKUMENTACJA:
+   Otwórz plik: URUCHAMIANIE.md
+
+═══════════════════════════════════════════════════════════════
+
+Pliki startowe:
+• START.bat        - Uruchom wszystko
+• STOP.bat         - Zatrzymaj wszystko
+• backend/start-backend.bat   - Tylko backend
+• frontend/start-frontend.bat - Tylko frontend
+
+═══════════════════════════════════════════════════════════════

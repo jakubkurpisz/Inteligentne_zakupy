@@ -6,7 +6,8 @@ import {
   ShoppingCart,
   AlertTriangle,
   Settings,
-  Database
+  Database,
+  Package
 } from 'lucide-react'
 
 const menuItems = [
@@ -20,7 +21,13 @@ const menuItems = [
     path: '/sales-analysis',
     icon: TrendingUp,
     label: 'Analiza Sprzedaży',
-    description: 'Raporty i trendy'
+    description: 'Historia transakcji'
+  },
+  {
+    path: '/stany-magazynowe',
+    icon: Package,
+    label: 'Stany Magazynowe',
+    description: 'Produkty w magazynie'
   },
   {
     path: '/demand-forecast',
@@ -37,8 +44,8 @@ const menuItems = [
   {
     path: '/dead-stock',
     icon: AlertTriangle,
-    label: 'Martwe Zapasy',
-    description: 'Alerty i ostrzeżenia'
+    label: 'Martwe Stany',
+    description: 'Analiza rotacji zapasów'
   },
   {
     path: '/settings',

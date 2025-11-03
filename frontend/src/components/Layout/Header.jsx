@@ -15,7 +15,7 @@ function Header({ onMenuClick }) {
             <div className="w-8 h-8 bg-gradient-to-br from-primary-500 to-primary-700 rounded-lg flex items-center justify-center">
               <span className="text-white font-bold text-sm">G</span>
             </div>
-            <h1 className="text-xl font-bold text-gray-900">Gemini AI</h1>
+            <h1 className="text-xl font-bold text-gray-900">Sporting AI</h1>
             <span className="text-sm text-gray-500 hidden md:inline">
               Analiza Sprzedaży i Zakupów
             </span>

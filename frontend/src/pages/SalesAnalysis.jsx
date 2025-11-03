@@ -3,6 +3,7 @@ import { Calendar, TrendingUp, Download, Filter } from 'lucide-react'
 import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts'
 
 function SalesAnalysis() {
+  const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002';
   const [salesData, setSalesData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -21,7 +22,7 @@ function SalesAnalysis() {
   useEffect(() => {
     const fetchSalesData = async () => {
       try {
-        const response = await fetch('http://localhost:3001/api/sales-data');
+        const response = await fetch(`${API_URL}/api/sales-data`);
         if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`);
         }
@@ -38,7 +39,7 @@ function SalesAnalysis() {
 
     const fetchSalesSummary = async () => {
       try {
-        const response = await fetch('http://localhost:3001/api/sales-summary');
+        const response = await fetch(`${API_URL}/api/sales-summary`);
         if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`);
         }
@@ -56,12 +57,16 @@ function SalesAnalysis() {
   const processSalesData = (data) => {
     // Przetwarzanie danych dla wykresu sprzedaży dziennej (zamiast miesięcznej)
     const dailySalesMap = data.reduce((acc, item) => {
-      const date = item.DataSprzedazy;
-      const nettoValue = parseFloat(item.WartoscNetto.replace(',', '.')); // Konwersja na liczbę
+      // Pomijamy elementy bez daty sprzedaży
+      if (!item.LastUpdated && !item.DataSprzedazy) return acc;
+
+      const date = item.LastUpdated ? item.LastUpdated.split('T')[0] : item.DataSprzedazy;
+      const nettoValue = parseFloat(item.DetalicznaNetto || 0);
+
       if (!acc[date]) {
         acc[date] = { date: date, sprzedaz: 0 };
       }
-      acc[date].sprzedaz += nettoValue;
+      acc[date].sprzedaz += nettoValue * parseFloat(item.Stan || 0);
       return acc;
     }, {});
         const processedDailySales = Object.values(dailySalesMap).sort((a, b) => new Date(a.date) - new Date(b.date));
@@ -70,7 +75,7 @@ function SalesAnalysis() {
         // Przetwarzanie danych dla wykresu kategorii
         const categorySalesMap = data.reduce((acc, item) => {
           const category = item.Rodzaj || 'Nieznana';
-          const nettoValue = parseFloat(item.WartoscNetto);
+          const nettoValue = parseFloat(item.DetalicznaNetto || 0) * parseFloat(item.Stan || 0);
           if (!acc[category]) {
             acc[category] = 0;
           }
@@ -88,14 +93,17 @@ function SalesAnalysis() {
     
         // Przetwarzanie danych dla rozkładu transakcji w ciągu dnia (teraz dziennego)
         const dailyTransactionsMap = data.reduce((acc, item) => {
-          const date = item.DataSprzedazy;
-          const quantity = parseFloat(item.IloscSprzedana);
+          if (!item.LastUpdated && !item.DataSprzedazy) return acc;
+
+          const date = item.LastUpdated ? item.LastUpdated.split('T')[0] : item.DataSprzedazy;
+          const quantity = parseFloat(item.Stan || 0);
           if (!acc[date]) {
             acc[date] = { date: date, transakcje: 0 };
           }
           acc[date].transakcje += quantity;
           return acc;
-        }, {});    const processedDailyTransactions = Object.values(dailyTransactionsMap).sort((a, b) => new Date(a.date) - new Date(b.date));
+        }, {});
+    const processedDailyTransactions = Object.values(dailyTransactionsMap).sort((a, b) => new Date(a.date) - new Date(b.date));
     setDailyTransactionsData(processedDailyTransactions);
   };
 
@@ -226,7 +234,7 @@ function SalesAnalysis() {
               <p className="text-3xl font-bold text-gray-900 mt-2">{monthlyData.reduce((sum, item) => sum + item.sprzedaz, 0).toFixed(2)} zł</p>
               <div className="flex items-center mt-2 text-green-600">
                 <TrendingUp className="w-4 h-4 mr-1" />
-                <span className="text-sm font-medium">Dane z arkusza</span>
+                <span className="text-sm font-medium">Wartość produktów w magazynie</span>
               </div>
             </div>
           </div>
@@ -236,10 +244,10 @@ function SalesAnalysis() {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-sm text-gray-600 font-medium">Liczba transakcji</p>
-              <p className="text-3xl font-bold text-gray-900 mt-2">{dailyTransactionsData.reduce((sum, item) => sum + item.transakcje, 0)}</p>
+              <p className="text-3xl font-bold text-gray-900 mt-2">{dailyTransactionsData.reduce((sum, item) => sum + item.transakcje, 0).toFixed(0)}</p>
               <div className="flex items-center mt-2 text-green-600">
                 <TrendingUp className="w-4 h-4 mr-1" />
-                <span className="text-sm font-medium">Dane z arkusza</span>
+                <span className="text-sm font-medium">Całkowity stan magazynowy</span>
               </div>
             </div>
           </div>
@@ -249,10 +257,10 @@ function SalesAnalysis() {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-sm text-gray-600 font-medium">Liczba unikalnych produktów</p>
-              <p className="text-3xl font-bold text-gray-900 mt-2">{new Set(salesData.map(item => item.TowarId)).size}</p>
+              <p className="text-3xl font-bold text-gray-900 mt-2">{salesData.length}</p>
               <div className="flex items-center mt-2 text-green-600">
                 <TrendingUp className="w-4 h-4 mr-1" />
-                <span className="text-sm font-medium">Dane z arkusza</span>
+                <span className="text-sm font-medium">Dane z bazy</span>
               </div>
             </div>
           </div>

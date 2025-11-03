@@ -7,7 +7,8 @@ import {
   AlertTriangle,
   Settings,
   Database,
-  Package
+  Package,
+  Calendar
 } from 'lucide-react'
 
 const menuItems = [
@@ -46,6 +47,12 @@ const menuItems = [
     icon: AlertTriangle,
     label: 'Martwe Stany',
     description: 'Analiza rotacji zapasów'
+  },
+  {
+    path: '/sales-plans',
+    icon: Calendar,
+    label: 'Plany Sprzedażowe',
+    description: 'Zarządzanie planami'
   },
   {
     path: '/settings',

@@ -6,6 +6,7 @@ import StanyMagazynowe from './pages/StanyMagazynowe'
 import DemandForecast from './pages/DemandForecast'
 import PurchaseSuggestions from './pages/PurchaseSuggestions'
 import DeadStock from './pages/DeadStock'
+import SalesPlans from './pages/SalesPlans'
 import Settings from './pages/Settings'
 
 function App() {
@@ -19,6 +20,7 @@ function App() {
           <Route path="/demand-forecast" element={<DemandForecast />} />
           <Route path="/purchase-suggestions" element={<PurchaseSuggestions />} />
           <Route path="/dead-stock" element={<DeadStock />} />
+          <Route path="/sales-plans" element={<SalesPlans />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </Layout>

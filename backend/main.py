@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import subprocess
 import threading
@@ -10,6 +10,9 @@ from typing import Dict, List, Optional
 import pyodbc
 import os
 from dotenv import load_dotenv
+import csv
+import requests
+from io import StringIO
 
 load_dotenv()
 
@@ -28,6 +31,10 @@ app.add_middleware(
 BASE_DIR = Path(__file__).parent.parent
 DATABASE_FILE = BASE_DIR / "product_states.db"
 PYTHON_SCRIPT = BASE_DIR / "product_data_manager_optimized.py"
+SALES_PLANS_CSV = BASE_DIR / "backend" / "sales_plans.csv"
+
+# URL Google Sheets
+GOOGLE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1B05iP_oad2Be-F-wbT02kipF0UJkObenHkSRRm6PfJU/export?format=csv&gid=0"
 
 
 def run_python_script():
@@ -482,6 +489,234 @@ async def get_statistics():
         )
 
 
+@app.get("/api/dashboard-stats")
+async def get_dashboard_stats():
+    """
+    Pobiera statystyki dla dashboardu:
+    - Sprzedaż dziś i wczoraj
+    - Liczba transakcji
+    - Poziom zapasów
+    - Alerty (dead stock)
+    - Sprzedaż tygodniowa (ostatnie 7 dni)
+    - Top 5 produktów
+    """
+    try:
+        # Połączenie z SQLite dla stanów magazynowych
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Statystyki zapasów
+        cursor.execute("SELECT COUNT(*) FROM products WHERE Stan > 0")
+        total_products = cursor.fetchone()[0]
+
+        cursor.execute("SELECT SUM(Stan * DetalicznaNetto) FROM products WHERE Stan > 0")
+        total_inventory_value = cursor.fetchone()[0] or 0
+
+        conn.close()
+
+        # Połączenie z SQL Server dla danych sprzedaży
+        server = os.getenv('SQL_SERVER', r'10.101.101.5\INSERTGT')
+        database = os.getenv('SQL_DATABASE', 'Sporting_Leszno')
+        username = os.getenv('SQL_USERNAME', 'zestawienia2')
+        password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
+
+        try:
+            sql_connection = pyodbc.connect(
+                'DRIVER={ODBC Driver 18 for SQL Server};'
+                f'SERVER={server};'
+                f'DATABASE={database};'
+                f'UID={username};'
+                f'PWD={password};'
+                'TrustServerCertificate=yes;'
+                'Connection Timeout=30;'
+            )
+        except pyodbc.Error as conn_err:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Błąd połączenia z SQL Server: {str(conn_err)}"
+            )
+
+        sql_cursor = sql_connection.cursor()
+        today = datetime.now().date()
+
+        # Sprzedaż dziś
+        query_today = f"""
+        SELECT
+            SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_WartBrutto ELSE ob_WartBrutto END) AS WartoscBrutto,
+            COUNT(DISTINCT dok_NrPelny) as LiczbaTransakcji,
+            COUNT(DISTINCT ob_TowId) as LiczbaProduktow
+        FROM vwZstSprzWgKhnt
+        WHERE CAST(dok_DataWyst AS DATE) = ?
+            AND dok_MagId IN (1,7,9)
+            AND dok_Podtyp <> 1
+            AND dok_Status <> 2
+        """
+        sql_cursor.execute(query_today, today)
+        today_row = sql_cursor.fetchone()
+
+        sales_today = float(today_row.WartoscBrutto or 0)
+        transactions_today = int(today_row.LiczbaTransakcji or 0)
+
+        # Sprzedaż wczoraj
+        yesterday = today - timedelta(days=1)
+        sql_cursor.execute(query_today, yesterday)
+        yesterday_row = sql_cursor.fetchone()
+        sales_yesterday = float(yesterday_row.WartoscBrutto or 0)
+        transactions_yesterday = int(yesterday_row.LiczbaTransakcji or 0)
+
+        # Oblicz zmiany procentowe
+        sales_change = ((sales_today - sales_yesterday) / sales_yesterday * 100) if sales_yesterday > 0 else 0
+        transactions_change = ((transactions_today - transactions_yesterday) / transactions_yesterday * 100) if transactions_yesterday > 0 else 0
+
+        # Sprzedaż tygodniowa (ostatnie 7 dni)
+        query_weekly = """
+        SELECT
+            CAST(dok_DataWyst AS DATE) AS Data,
+            SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_WartBrutto ELSE ob_WartBrutto END) AS WartoscBrutto
+        FROM vwZstSprzWgKhnt
+        WHERE CAST(dok_DataWyst AS DATE) >= DATEADD(day, -7, CAST(? AS DATE))
+            AND CAST(dok_DataWyst AS DATE) <= ?
+            AND dok_MagId IN (1,7,9)
+            AND dok_Podtyp <> 1
+            AND dok_Status <> 2
+        GROUP BY CAST(dok_DataWyst AS DATE)
+        ORDER BY Data
+        """
+        sql_cursor.execute(query_weekly, today, today)
+        weekly_rows = sql_cursor.fetchall()
+
+        # Mapowanie dni tygodnia
+        day_names = ['Pon', 'Wt', 'Śr', 'Czw', 'Pt', 'Sob', 'Nd']
+        weekly_sales = []
+        for row in weekly_rows:
+            day_name = day_names[row.Data.weekday()]
+            weekly_sales.append({
+                "name": day_name,
+                "data": row.Data.strftime('%Y-%m-%d'),
+                "sprzedaz": float(row.WartoscBrutto or 0)
+            })
+
+        # Top 5 produktów (ostatnie 30 dni)
+        query_top_products = """
+        SELECT TOP 5
+            MAX(tw.tw_Symbol) AS Symbol,
+            MAX(tw.tw_Nazwa) AS Nazwa,
+            SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_WartBrutto ELSE ob_WartBrutto END) AS WartoscSprzedazy,
+            SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_IloscMag ELSE ob_IloscMag END) AS IloscSprzedana
+        FROM vwZstSprzWgKhnt
+        LEFT JOIN tw__Towar tw ON ob_TowId = tw.tw_Id
+        WHERE CAST(dok_DataWyst AS DATE) >= DATEADD(day, -30, CAST(? AS DATE))
+            AND dok_MagId IN (1,7,9)
+            AND dok_Podtyp <> 1
+            AND dok_Status <> 2
+        GROUP BY ob_TowId
+        ORDER BY WartoscSprzedazy DESC
+        """
+        sql_cursor.execute(query_top_products, today)
+        top_products_rows = sql_cursor.fetchall()
+
+        top_products = []
+        for row in top_products_rows:
+            top_products.append({
+                "symbol": row.Symbol or "N/A",
+                "nazwa": (row.Nazwa or "")[:30],  # Skróć nazwę do 30 znaków
+                "sprzedaz": float(row.WartoscSprzedazy or 0),
+                "ilosc": float(row.IloscSprzedana or 0)
+            })
+
+        sql_cursor.close()
+        sql_connection.close()
+
+        # Statystyki per magazyn (dziś)
+        query_per_warehouse = """
+        SELECT
+            dok_MagId,
+            SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_WartBrutto ELSE ob_WartBrutto END) AS WartoscBrutto,
+            SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_IloscMag ELSE ob_IloscMag END) AS IloscSprzedana,
+            COUNT(DISTINCT dok_NrPelny) as LiczbaTransakcji,
+            COUNT(DISTINCT ob_TowId) as LiczbaProduktow
+        FROM vwZstSprzWgKhnt
+        WHERE CAST(dok_DataWyst AS DATE) = ?
+            AND dok_MagId IN (1,2,7,9)
+            AND dok_Podtyp <> 1
+            AND dok_Status <> 2
+        GROUP BY dok_MagId
+        """
+
+        sql_connection = pyodbc.connect(
+            'DRIVER={ODBC Driver 18 for SQL Server};'
+            f'SERVER={server};'
+            f'DATABASE={database};'
+            f'UID={username};'
+            f'PWD={password};'
+            'TrustServerCertificate=yes;'
+            'Connection Timeout=30;'
+        )
+        sql_cursor = sql_connection.cursor()
+        sql_cursor.execute(query_per_warehouse, today)
+        warehouse_rows = sql_cursor.fetchall()
+
+        warehouse_names = {1: 'GLS', 2: 'GLS DEPOZYT', 7: 'JEANS', 9: 'INNE'}
+        warehouse_stats = []
+
+        for row in warehouse_rows:
+            mag_id = row.dok_MagId
+            wartość = float(row.WartoscBrutto or 0)
+            ilosc = float(row.IloscSprzedana or 0)
+            transakcje = int(row.LiczbaTransakcji or 0)
+            produkty = int(row.LiczbaProduktow or 0)
+
+            # Oblicz UPT (Units Per Transaction)
+            upt = round(ilosc / transakcje, 2) if transakcje > 0 else 0
+
+            # Oblicz średnią wartość transakcji
+            avg_transaction = round(wartość / transakcje, 2) if transakcje > 0 else 0
+
+            warehouse_stats.append({
+                "mag_id": mag_id,
+                "nazwa": warehouse_names.get(mag_id, f"MAG_{mag_id}"),
+                "sprzedaz": round(wartość, 2),
+                "ilosc_sprzedana": round(ilosc, 0),
+                "transakcje": transakcje,
+                "produkty": produkty,
+                "upt": upt,
+                "avg_transaction": avg_transaction
+            })
+
+        sql_cursor.close()
+        sql_connection.close()
+
+        # Zlicz alerty (produkty dead stock)
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM products WHERE Stan > 0")
+        products_with_stock = cursor.fetchone()[0]
+        conn.close()
+
+        # Zwróć wszystkie statystyki
+        return {
+            "sales_today": round(sales_today, 2),
+            "sales_yesterday": round(sales_yesterday, 2),
+            "sales_change": round(sales_change, 1),
+            "transactions_today": transactions_today,
+            "transactions_yesterday": transactions_yesterday,
+            "transactions_change": round(transactions_change, 1),
+            "inventory_count": total_products,
+            "inventory_value": round(total_inventory_value, 2),
+            "alerts_count": 0,  # TODO: Oblicz z dead stock
+            "alerts_critical": 0,  # TODO: Oblicz z dead stock
+            "weekly_sales": weekly_sales,
+            "top_products": top_products,
+            "warehouse_stats": warehouse_stats
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd podczas pobierania statystyk dashboardu: {str(e)}"
+        )
+
+
 @app.get("/api/dead-stock")
 async def get_dead_stock(
     min_days: Optional[int] = 0,  # Minimum dni bez ruchu
@@ -769,6 +1004,219 @@ async def get_dead_stock(
         raise HTTPException(
             status_code=500,
             detail=f"Nieoczekiwany błąd: {str(e)}"
+        )
+
+
+def fetch_sales_plans_from_google():
+    """Pobiera dane planów sprzedażowych z Google Sheets i zapisuje lokalnie"""
+    try:
+        print(f"Pobieranie danych z Google Sheets: {GOOGLE_SHEETS_URL}")
+        response = requests.get(GOOGLE_SHEETS_URL, timeout=10)
+        response.raise_for_status()
+
+        # Zapisz do pliku lokalnego
+        with open(SALES_PLANS_CSV, 'w', encoding='utf-8', newline='') as f:
+            f.write(response.text)
+
+        print(f"Dane planów sprzedażowych zapisane do: {SALES_PLANS_CSV}")
+        return True
+    except Exception as e:
+        print(f"Błąd podczas pobierania danych z Google Sheets: {e}")
+        return False
+
+
+def parse_sales_plans():
+    """Parsuje plik CSV z planami sprzedażowymi"""
+    plans = []
+
+    try:
+        with open(SALES_PLANS_CSV, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                # Parsuj datę
+                date_str = row['DATA']
+
+                # Zamień przecinki na kropki w liczbach
+                gls_plan = float(row['GLS'].replace(',', '.')) if row['GLS'] else 0
+                four_f_plan = float(row['4F'].replace(',', '.')) if row['4F'] else 0
+                jeans_plan = float(row['JEANS'].replace(',', '.')) if row['JEANS'] else 0
+
+                plans.append({
+                    "date": date_str,
+                    "gls": gls_plan,
+                    "four_f": four_f_plan,
+                    "jeans": jeans_plan,
+                    "total": gls_plan + four_f_plan + jeans_plan
+                })
+
+        return plans
+    except Exception as e:
+        print(f"Błąd podczas parsowania planów: {e}")
+        return []
+
+
+@app.get("/api/sales-plans")
+async def get_sales_plans(
+    refresh: bool = False,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
+):
+    """
+    Zwraca plany sprzedażowe
+    - refresh: jeśli True, pobiera świeże dane z Google Sheets
+    - start_date: opcjonalna data początkowa (format: DD.MM.YYYY)
+    - end_date: opcjonalna data końcowa (format: DD.MM.YYYY)
+    """
+    try:
+        # Jeśli refresh=True lub plik nie istnieje, pobierz z Google Sheets
+        if refresh or not SALES_PLANS_CSV.exists():
+            success = fetch_sales_plans_from_google()
+            if not success and not SALES_PLANS_CSV.exists():
+                raise HTTPException(
+                    status_code=500,
+                    detail="Nie udało się pobrać danych z Google Sheets i brak lokalnego pliku"
+                )
+
+        # Parsuj plany
+        plans = parse_sales_plans()
+
+        if not plans:
+            raise HTTPException(
+                status_code=404,
+                detail="Brak danych planów sprzedażowych"
+            )
+
+        # Filtruj po datach jeśli podano
+        if start_date or end_date:
+            filtered_plans = []
+            for plan in plans:
+                plan_date = datetime.strptime(plan['date'], '%d.%m.%Y')
+
+                if start_date:
+                    start = datetime.strptime(start_date, '%d.%m.%Y')
+                    if plan_date < start:
+                        continue
+
+                if end_date:
+                    end = datetime.strptime(end_date, '%d.%m.%Y')
+                    if plan_date > end:
+                        continue
+
+                filtered_plans.append(plan)
+
+            plans = filtered_plans
+
+        # Oblicz statystyki
+        total_gls = sum(p['gls'] for p in plans)
+        total_4f = sum(p['four_f'] for p in plans)
+        total_jeans = sum(p['jeans'] for p in plans)
+        total_all = sum(p['total'] for p in plans)
+
+        return {
+            "success": True,
+            "count": len(plans),
+            "summary": {
+                "total_gls": round(total_gls, 2),
+                "total_4f": round(total_4f, 2),
+                "total_jeans": round(total_jeans, 2),
+                "total_all": round(total_all, 2),
+                "avg_daily_gls": round(total_gls / len(plans), 2) if plans else 0,
+                "avg_daily_4f": round(total_4f / len(plans), 2) if plans else 0,
+                "avg_daily_jeans": round(total_jeans / len(plans), 2) if plans else 0,
+                "avg_daily_all": round(total_all / len(plans), 2) if plans else 0
+            },
+            "plans": plans
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd podczas pobierania planów: {str(e)}"
+        )
+
+
+@app.get("/api/sales-plans/today")
+async def get_today_sales_plan(refresh: bool = False):
+    """
+    Zwraca plan sprzedażowy na dzisiaj
+    """
+    try:
+        # Jeśli refresh=True lub plik nie istnieje, pobierz z Google Sheets
+        if refresh or not SALES_PLANS_CSV.exists():
+            fetch_sales_plans_from_google()
+
+        # Parsuj plany
+        plans = parse_sales_plans()
+
+        if not plans:
+            raise HTTPException(
+                status_code=404,
+                detail="Brak danych planów sprzedażowych"
+            )
+
+        # Znajdź plan na dzisiaj
+        today = datetime.now().strftime('%d.%m.%Y')
+        today_plan = None
+
+        for plan in plans:
+            if plan['date'] == today:
+                today_plan = plan
+                break
+
+        if not today_plan:
+            # Jeśli nie ma planu na dzisiaj, zwróć zerowe wartości
+            today_plan = {
+                "date": today,
+                "gls": 0,
+                "four_f": 0,
+                "jeans": 0,
+                "total": 0,
+                "note": "Brak planu na dzisiaj"
+            }
+
+        return {
+            "success": True,
+            "plan": today_plan
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd podczas pobierania planu na dziś: {str(e)}"
+        )
+
+
+@app.post("/api/sales-plans/refresh")
+async def refresh_sales_plans():
+    """
+    Wymusza odświeżenie danych z Google Sheets
+    """
+    try:
+        success = fetch_sales_plans_from_google()
+
+        if success:
+            plans = parse_sales_plans()
+            return {
+                "success": True,
+                "message": "Dane zostały odświeżone",
+                "count": len(plans)
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Nie udało się pobrać danych z Google Sheets"
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd podczas odświeżania danych: {str(e)}"
         )
 
 

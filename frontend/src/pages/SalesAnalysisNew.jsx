@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react'
 import { Calendar, TrendingUp, Download, Filter, RefreshCw, Warehouse } from 'lucide-react'
 import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
+import { API_BASE_URL } from '../config/api'
 
 function SalesAnalysisNew() {
-  const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002';
+  const API_URL = API_BASE_URL;
   const [salesData, setSalesData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);

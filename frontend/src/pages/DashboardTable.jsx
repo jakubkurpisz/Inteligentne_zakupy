@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react'
 import { TrendingUp, TrendingDown, AlertCircle, RefreshCw, Clock } from 'lucide-react'
+import { API_BASE_URL } from '../config/api'
 
 function DashboardTable() {
-  const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002';
+  const API_URL = API_BASE_URL;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [stats, setStats] = useState(null);

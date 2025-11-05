@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react'
 import { AlertTriangle, XCircle, TrendingDown, Calendar, DollarSign, Package, Search, Filter, Download, Warehouse, RefreshCw } from 'lucide-react'
 import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
+import { API_BASE_URL } from '../config/api'
 
 function DeadStock() {
-  const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002';
+  const API_URL = API_BASE_URL;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [deadStockData, setDeadStockData] = useState(null);

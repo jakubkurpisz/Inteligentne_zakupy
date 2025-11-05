@@ -12,8 +12,7 @@ import {
   Legend,
   ResponsiveContainer
 } from 'recharts'
-
-const API_BASE_URL = 'http://localhost:3002'
+import { API_BASE_URL } from '../config/api'
 
 // Funkcja formatująca liczby w stylu polskim
 const formatNumber = (num) => {

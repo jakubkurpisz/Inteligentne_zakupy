@@ -1,75 +1,23 @@
 /**
  * Dynamiczna konfiguracja API
- * Automatycznie wykrywa środowisko i ustawia odpowiedni adres backendu
+ * Backend i frontend działają na tym samym IP
+ * Frontend automatycznie łączy się z backendem na tym samym adresie IP
  */
 
-// Funkcja wykrywająca środowisko
-const detectEnvironment = () => {
-  const hostname = window.location.hostname;
-
-  // Sprawdź czy to localhost lub IP lokalne
-  const isLocalhost = hostname === 'localhost' ||
-                     hostname === '127.0.0.1' ||
-                     hostname.startsWith('192.168.') ||
-                     hostname.startsWith('10.') ||
-                     hostname.startsWith('172.');
-
-  return {
-    isLocalhost,
-    hostname,
-    port: window.location.port
-  };
-};
-
-// Konfiguracja dla różnych środowisk
-const environments = {
-  // Konfiguracja dla sieci lokalnej
-  local: {
-    // Backend na tej samej maszynie
-    apiUrl: 'http://localhost:3002',
-    // Alternatywnie możesz ustawić konkretny IP:
-    // apiUrl: 'http://192.168.1.100:3002',
-  },
-
-  // Konfiguracja dla domeny produkcyjnej
-  production: {
-    // Twoja domena - ZMIEŃ NA SWOJĄ!
-    apiUrl: 'https://twoja-domena.pl/api',
-    // Lub z portem: 'https://twoja-domena.pl:3002'
-  },
-
-  // Konfiguracja dla VM (automatycznie użyje IP hosta)
-  vm: {
-    // Jeśli frontend jest na VM, backend może być na hoście
-    apiUrl: `http://${window.location.hostname}:3002`,
-  }
-};
+const BACKEND_PORT = 3002;
 
 // Funkcja zwracająca odpowiedni URL API
 export const getApiUrl = () => {
-  // Najpierw sprawdź czy jest zmienna środowiskowa (najwyższy priorytet)
+  // 1. NAJWYŻSZY PRIORYTET: Zmienna środowiskowa (dla specjalnych przypadków)
   if (import.meta.env.VITE_API_URL) {
     return import.meta.env.VITE_API_URL;
   }
 
-  const env = detectEnvironment();
+  // 2. DOMYŚLNIE: Użyj tego samego IP/hostname co frontend
+  const hostname = window.location.hostname;
 
-  // Jeśli jest localhost/lokalna sieć
-  if (env.isLocalhost) {
-    // Sprawdź czy frontend działa na porcie dev (5173) czy production
-    if (env.port === '5173' || env.port === '5174') {
-      // Tryb developerski - backend na localhost:3002
-      return environments.local.apiUrl;
-    } else if (env.hostname.startsWith('192.168.') ||
-               env.hostname.startsWith('10.')) {
-      // VM w sieci lokalnej - użyj tego samego hosta
-      return `http://${env.hostname}:3002`;
-    }
-    return environments.local.apiUrl;
-  }
-
-  // W przeciwnym razie użyj konfiguracji produkcyjnej (domena)
-  return environments.production.apiUrl;
+  // Backend działa ZAWSZE na tym samym IP co frontend, tylko na innym porcie
+  return `http://${hostname}:${BACKEND_PORT}`;
 };
 
 // Eksportuj finalny URL API
@@ -84,18 +32,28 @@ export const buildApiUrl = (endpoint) => {
 
 // Eksportuj informacje o środowisku (do debugowania)
 export const getEnvironmentInfo = () => {
-  const env = detectEnvironment();
+  const hostname = window.location.hostname;
+  const frontendPort = window.location.port;
+
   return {
-    environment: env.isLocalhost ? 'local' : 'production',
-    hostname: env.hostname,
-    port: env.port,
-    apiUrl: API_BASE_URL
+    frontend: {
+      hostname,
+      port: frontendPort,
+      url: window.location.href
+    },
+    backend: {
+      hostname,
+      port: BACKEND_PORT,
+      apiUrl: API_BASE_URL
+    },
+    note: 'Frontend i backend działają na tym samym IP'
   };
 };
 
 // Log konfiguracji w trybie development
 if (import.meta.env.DEV) {
   console.log('🔧 API Configuration:', getEnvironmentInfo());
+  console.log('📡 Backend URL:', API_BASE_URL);
 }
 
 export default {

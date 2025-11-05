@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 import csv
 import requests
 from io import StringIO
+import socket
 
 load_dotenv()
 
@@ -35,6 +36,21 @@ SALES_PLANS_CSV = BASE_DIR / "backend" / "sales_plans.csv"
 
 # URL Google Sheets
 GOOGLE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1B05iP_oad2Be-F-wbT02kipF0UJkObenHkSRRm6PfJU/export?format=csv&gid=0"
+
+
+def get_local_ip():
+    """Wykrywa lokalne IP maszyny"""
+    try:
+        # Tworzymy połączenie do zewnętrznego adresu (nie musi być dostępny)
+        # aby system wybrał odpowiedni interfejs sieciowy
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        return local_ip
+    except Exception:
+        # Fallback na localhost jeśli wykrywanie nie powiedzie się
+        return "127.0.0.1"
 
 
 def run_python_script():
@@ -88,12 +104,27 @@ def get_db_connection():
     return conn
 
 
+@app.get("/api/server-info")
+async def get_server_info():
+    """Zwraca informacje o serwerze - IP i port"""
+    local_ip = get_local_ip()
+    return {
+        "ip": local_ip,
+        "port": 3002,
+        "api_url": f"http://{local_ip}:3002",
+        "message": "Backend API - Inteligentne Zakupy"
+    }
+
+
 @app.get("/")
 async def root():
     """Endpoint główny"""
+    local_ip = get_local_ip()
     return {
         "message": "Inteligentne Zakupy API",
         "version": "1.0.0",
+        "server_ip": local_ip,
+        "api_url": f"http://{local_ip}:3002",
         "endpoints": [
             "/api/sales-data",
             "/api/sales-summary",

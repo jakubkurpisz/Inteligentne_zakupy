@@ -4,7 +4,7 @@
  * Frontend automatycznie łączy się z backendem na tym samym adresie IP
  */
 
-const BACKEND_PORT = 3002;
+const BACKEND_PORT = 5555;
 
 // Funkcja zwracająca odpowiedni URL API
 export const getApiUrl = () => {

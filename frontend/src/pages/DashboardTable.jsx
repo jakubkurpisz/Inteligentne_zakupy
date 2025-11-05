@@ -7,10 +7,12 @@ function DashboardTable() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [stats, setStats] = useState(null);
+  const [salesPlans, setSalesPlans] = useState(null);
   const [currentTime, setCurrentTime] = useState(new Date());
 
   useEffect(() => {
     fetchDashboardStats();
+    fetchSalesPlans();
     const interval = setInterval(() => {
       setCurrentTime(new Date());
     }, 1000);
@@ -31,6 +33,26 @@ function DashboardTable() {
       console.error("Błąd podczas pobierania statystyk dashboardu:", error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchSalesPlans = async () => {
+    try {
+      const response = await fetch(`${API_URL}/api/sales-plans/today`);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const data = await response.json();
+      setSalesPlans(data);
+    } catch (error) {
+      console.error("Błąd podczas pobierania planów sprzedażowych:", error);
+      // Użyj domyślnych wartości jeśli API nie odpowiada
+      setSalesPlans({
+        GLS: 0,
+        '4F': 0,
+        JEANS: 0,
+        total: 0
+      });
     }
   };
 
@@ -87,6 +109,9 @@ function DashboardTable() {
   const totalWarehouseItems = stats.warehouse_stats?.reduce((sum, w) => sum + w.ilosc_sprzedana, 0) || 0;
   const totalUPT = totalWarehouseTransactions > 0 ? totalWarehouseItems / totalWarehouseTransactions : 0;
 
+  // Pobierz plan na dziś z API
+  const totalPlan = salesPlans?.total || 0;
+
   return (
     <div className="space-y-4">
       {/* Nagłówek z zegarem */}
@@ -131,13 +156,13 @@ function DashboardTable() {
             <tr className="border-b border-gray-200 bg-blue-50">
               <td className="py-4 px-4 font-bold text-lg border-r border-gray-300">CAŁA FIRMA</td>
               <td className="py-4 px-4 text-center border-r border-gray-300">
-                <div className="text-sm text-gray-600">PLAN: {formatNumber(33358.56)}</div>
+                <div className="text-sm text-gray-600">PLAN: {formatNumber(totalPlan)}</div>
                 <div className="text-3xl font-bold text-red-600">{formatNumber(totalWarehouseSales)} zł</div>
               </td>
               <td className="py-4 px-4 text-center border-r border-gray-300">
-                <div className="text-sm text-gray-600">RÓŻNICA: {formatNumber(totalWarehouseSales - 33358.56)}</div>
-                <div className={`text-2xl font-bold ${getChangeColor(stats.sales_change)}`}>
-                  {stats.sales_change >= 0 ? '+' : ''}{formatNumber(stats.sales_change, 1)}%
+                <div className="text-sm text-gray-600">RÓŻNICA: {formatNumber(totalWarehouseSales - totalPlan)}</div>
+                <div className={`text-2xl font-bold ${getChangeColor((totalWarehouseSales - totalPlan) / totalPlan * 100)}`}>
+                  {((totalWarehouseSales - totalPlan) / totalPlan * 100) >= 0 ? '+' : ''}{formatNumber((totalWarehouseSales - totalPlan) / totalPlan * 100, 1)}%
                 </div>
               </td>
               <td className="py-4 px-4 text-center border-r border-gray-300">

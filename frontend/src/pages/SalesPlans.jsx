@@ -44,12 +44,12 @@ function SalesPlans() {
   })
 
   // Pobierz dane planów
-  const fetchPlans = async (refresh = false) => {
+  const fetchPlans = async (sync = false) => {
     setLoading(true)
     setError(null)
 
     try {
-      let url = `${API_BASE_URL}/api/sales-plans?refresh=${refresh}`
+      let url = `${API_BASE_URL}/api/sales-plans?sync=${sync}`
 
       if (filters.startDate) {
         url += `&start_date=${filters.startDate}`
@@ -80,30 +80,30 @@ function SalesPlans() {
     }
   }
 
-  // Odśwież dane z Google Sheets
-  const handleRefresh = async () => {
+  // Synchronizuj dane z Google Sheets
+  const handleSync = async () => {
     setRefreshing(true)
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/sales-plans/refresh`, {
+      const response = await fetch(`${API_BASE_URL}/api/sales-plans/sync`, {
         method: 'POST'
       })
 
       if (!response.ok) {
-        throw new Error('Błąd podczas odświeżania danych')
+        throw new Error('Błąd podczas synchronizacji danych')
       }
 
       const data = await response.json()
 
       if (data.success) {
-        // Po odświeżeniu, pobierz nowe dane
+        // Po synchronizacji, pobierz nowe dane
         await fetchPlans(false)
       } else {
-        throw new Error(data.message || 'Nie udało się odświeżyć danych')
+        throw new Error(data.message || 'Nie udało się zsynchronizować danych')
       }
     } catch (err) {
       setError(err.message)
-      console.error('Błąd odświeżania:', err)
+      console.error('Błąd synchronizacji:', err)
     } finally {
       setRefreshing(false)
     }
@@ -173,7 +173,7 @@ function SalesPlans() {
           <p className="text-gray-600 mt-1">Zarządzanie planami sprzedaży z Google Sheets</p>
         </div>
         <button
-          onClick={handleRefresh}
+          onClick={handleSync}
           disabled={refreshing}
           className={`flex items-center space-x-2 px-4 py-2 rounded-lg font-medium transition-colors ${
             refreshing
@@ -182,7 +182,7 @@ function SalesPlans() {
           }`}
         >
           <RefreshCw className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} />
-          <span>{refreshing ? 'Odświeżanie...' : 'Odśwież z Google Sheets'}</span>
+          <span>{refreshing ? 'Synchronizacja...' : 'Synchronizuj z Google Sheets'}</span>
         </button>
       </div>
 

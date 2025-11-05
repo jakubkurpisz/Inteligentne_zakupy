@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react'
 import { Package, Search, Filter, Download, TrendingUp, AlertCircle, Warehouse } from 'lucide-react'
 import { BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
+import { API_BASE_URL } from '../config/api'
 
 function StanyMagazynowe() {
-  const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002';
+  const API_URL = API_BASE_URL;
   const [products, setProducts] = useState([]);
   const [filteredProducts, setFilteredProducts] = useState([]);
   const [loading, setLoading] = useState(true);

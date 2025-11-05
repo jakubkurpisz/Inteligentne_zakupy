@@ -82,13 +82,31 @@ def schedule_python_script():
         time.sleep(5 * 60)  # 5 minut
 
 
+def schedule_sales_plans_sync():
+    """Synchronizuje plany sprzedażowe co 30 minut"""
+    while True:
+        time.sleep(30 * 60)  # 30 minut
+        print("\n[AUTO-SYNC] Rozpoczynam automatyczną synchronizację planów sprzedażowych...")
+        try:
+            success = sync_sales_plans_from_google()
+            if success:
+                print("[AUTO-SYNC] Synchronizacja planów zakończona pomyślnie!")
+            else:
+                print("[AUTO-SYNC] Synchronizacja planów nie powiodła się!")
+        except Exception as e:
+            print(f"[AUTO-SYNC] Błąd synchronizacji planów: {e}")
+
+
 # Uruchom skrypt przy starcie i w tle co 5 minut
 @app.on_event("startup")
 async def startup_event():
-    # Uruchom raz przy starcie
-    threading.Thread(target=run_python_script, daemon=True).start()
-    # Uruchom harmonogram w tle
+    # Uruchom harmonogram aktualizacji produktów (bez natychmiastowego uruchomienia)
+    print("[STARTUP] Harmonogram aktualizacji produktów zostanie uruchomiony za 5 minut...")
     threading.Thread(target=schedule_python_script, daemon=True).start()
+
+    # Uruchom harmonogram synchronizacji planów (bez natychmiastowego uruchomienia)
+    print("[STARTUP] Harmonogram synchronizacji planów zostanie uruchomiony za 30 minut...")
+    threading.Thread(target=schedule_sales_plans_sync, daemon=True).start()
 
 
 def get_db_connection():
@@ -110,8 +128,8 @@ async def get_server_info():
     local_ip = get_local_ip()
     return {
         "ip": local_ip,
-        "port": 3002,
-        "api_url": f"http://{local_ip}:3002",
+        "port": 5555,
+        "api_url": f"http://{local_ip}:5555",
         "message": "Backend API - Inteligentne Zakupy"
     }
 
@@ -124,7 +142,7 @@ async def root():
         "message": "Inteligentne Zakupy API",
         "version": "1.0.0",
         "server_ip": local_ip,
-        "api_url": f"http://{local_ip}:3002",
+        "api_url": f"http://{local_ip}:5555",
         "endpoints": [
             "/api/sales-data",
             "/api/sales-summary",
@@ -365,78 +383,45 @@ async def get_updated_products(minutes: int = 10):
 async def get_sales_history(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    period: Optional[str] = "daily",  # daily, weekly, monthly, yearly
-    mag_ids: Optional[str] = None  # Comma-separated mag_ids, np. "1,7,9"
+    period: Optional[str] = "daily",
+    mag_ids: Optional[str] = None
 ):
-    """Pobiera historię sprzedaży z SQL Server z możliwością filtrowania"""
-    server = os.getenv('SQL_SERVER', r'10.101.101.5\INSERTGT')
-    database = os.getenv('SQL_DATABASE', 'Sporting_Leszno')
-    username = os.getenv('SQL_USERNAME', 'zestawienia2')
-    password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
-
-    try:
-        connection = pyodbc.connect(
-            'DRIVER={ODBC Driver 18 for SQL Server};'
-            f'SERVER={server};'
-            f'DATABASE={database};'
-            f'UID={username};'
-            f'PWD={password};'
-            'TrustServerCertificate=yes;'
-            'Connection Timeout=30;'
-        )
-    except pyodbc.Error as conn_err:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Błąd połączenia z SQL Server: {str(conn_err)}"
-        )
-
-    cursor = connection.cursor()
+    """Pobiera historię sprzedaży z lokalnej bazy SQLite"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
     # Parsowanie mag_ids
     if mag_ids:
-        # Konwertuj string "1,7,9" na listę [1, 7, 9]
         mag_id_list = [int(x.strip()) for x in mag_ids.split(',') if x.strip().isdigit()]
-        mag_id_filter = ','.join(str(x) for x in mag_id_list)
     else:
-        # Domyślnie wszystkie magazyny
-        mag_id_filter = "1,7,9"
+        mag_id_list = [1, 7, 9]
 
-    # Zapytanie z Twojego skryptu SPRZEDAZ_DZIENNA.PY - używa widoku vwZstSprzWgKhnt
-    query = f"""
+    # Buduj zapytanie SQL
+    query = """
     SELECT
-        dok_DataWyst AS DataSprzedazy,
-        SUM(CASE
-                WHEN dok_Typ IN (14, 6) THEN -ob_IloscMag
-                ELSE ob_IloscMag
-            END) AS IloscSprzedana,
-        SUM(CASE
-                WHEN dok_Typ IN (14, 6) THEN -ob_WartNetto
-                ELSE ob_WartNetto
-            END) AS WartoscNetto,
-        SUM(CASE
-                WHEN dok_Typ IN (14, 6) THEN -ob_WartBrutto
-                ELSE ob_WartBrutto
-            END) AS WartoscBrutto,
-        COUNT(DISTINCT dok_NrPelny) as LiczbaTransakcji,
-        COUNT(DISTINCT ob_TowId) as LiczbaProduktow
+        DataSprzedazy,
+        SUM(IloscSprzedana) AS IloscSprzedana,
+        SUM(WartoscNetto) AS WartoscNetto,
+        SUM(WartoscBrutto) AS WartoscBrutto,
+        SUM(LiczbaTransakcji) AS LiczbaTransakcji,
+        SUM(LiczbaProduktow) AS LiczbaProduktow
     FROM
-        vwZstSprzWgKhnt
+        sales_history
     WHERE
-        dok_MagId IN ({mag_id_filter})
-        AND dok_Podtyp <> 1
-        AND dok_Status <> 2
-    """
+        MagId IN ({})
+    """.format(','.join('?' * len(mag_id_list)))
 
-    # Dodaj filtrowanie dat jeśli podane
-    params = []
+    params = mag_id_list.copy()
+
+    # Dodaj filtrowanie dat
     if start_date:
-        query += " AND CAST(dok_DataWyst AS DATE) >= ?"
+        query += " AND DataSprzedazy >= ?"
         params.append(start_date)
     if end_date:
-        query += " AND CAST(dok_DataWyst AS DATE) <= ?"
+        query += " AND DataSprzedazy <= ?"
         params.append(end_date)
 
-    query += " GROUP BY dok_DataWyst"
+    query += " GROUP BY DataSprzedazy"
     query += " ORDER BY DataSprzedazy DESC"
 
     try:
@@ -446,28 +431,29 @@ async def get_sales_history(
         sales_history = []
         for row in rows:
             sales_history.append({
-                "DataSprzedazy": row.DataSprzedazy.strftime('%Y-%m-%d') if row.DataSprzedazy else None,
-                "IloscSprzedana": float(row.IloscSprzedana or 0),
-                "WartoscNetto": float(row.WartoscNetto or 0),
-                "WartoscBrutto": float(row.WartoscBrutto or 0),
-                "LiczbaTransakcji": int(row.LiczbaTransakcji or 0),
-                "LiczbaProduktow": int(row.LiczbaProduktow or 0)
+                "DataSprzedazy": row[0],
+                "IloscSprzedana": float(row[1] or 0),
+                "WartoscNetto": float(row[2] or 0),
+                "WartoscBrutto": float(row[3] or 0),
+                "LiczbaTransakcji": int(row[4] or 0),
+                "LiczbaProduktow": int(row[5] or 0)
             })
 
         cursor.close()
-        connection.close()
+        conn.close()
 
         return {
             "period": period,
             "start_date": start_date,
             "end_date": end_date,
             "total_records": len(sales_history),
-            "data": sales_history
+            "data": sales_history,
+            "source": "SQLite (synchronizowane z Subiekta)"
         }
 
     except Exception as e:
         cursor.close()
-        connection.close()
+        conn.close()
         raise HTTPException(
             status_code=500,
             detail=f"Błąd podczas pobierania historii sprzedaży: {str(e)}"
@@ -1038,104 +1024,172 @@ async def get_dead_stock(
         )
 
 
-def fetch_sales_plans_from_google():
-    """Pobiera dane planów sprzedażowych z Google Sheets i zapisuje lokalnie"""
+def sync_sales_plans_from_google():
+    """
+    Pobiera dane z Google Sheets i synchronizuje z bazą danych.
+    - Sprawdza czy data już istnieje w bazie
+    - Jeśli istnieje, weryfikuje wartości i aktualizuje przy niezgodności
+    - Jeśli nie istnieje, dodaje nowy rekord
+    """
     try:
         print(f"Pobieranie danych z Google Sheets: {GOOGLE_SHEETS_URL}")
         response = requests.get(GOOGLE_SHEETS_URL, timeout=10)
         response.raise_for_status()
 
-        # Zapisz do pliku lokalnego
-        with open(SALES_PLANS_CSV, 'w', encoding='utf-8', newline='') as f:
-            f.write(response.text)
+        # Parsuj CSV
+        csv_data = StringIO(response.text)
+        reader = csv.DictReader(csv_data)
 
-        print(f"Dane planów sprzedażowych zapisane do: {SALES_PLANS_CSV}")
-        return True
-    except Exception as e:
-        print(f"Błąd podczas pobierania danych z Google Sheets: {e}")
-        return False
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
+        added_count = 0
+        updated_count = 0
+        skipped_count = 0
 
-def parse_sales_plans():
-    """Parsuje plik CSV z planami sprzedażowymi"""
-    plans = []
-
-    try:
-        with open(SALES_PLANS_CSV, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                # Parsuj datę
+        for row in reader:
+            try:
                 date_str = row['DATA']
 
                 # Zamień przecinki na kropki w liczbach
                 gls_plan = float(row['GLS'].replace(',', '.')) if row['GLS'] else 0
                 four_f_plan = float(row['4F'].replace(',', '.')) if row['4F'] else 0
                 jeans_plan = float(row['JEANS'].replace(',', '.')) if row['JEANS'] else 0
+                total_plan = gls_plan + four_f_plan + jeans_plan
 
-                plans.append({
-                    "date": date_str,
-                    "gls": gls_plan,
-                    "four_f": four_f_plan,
-                    "jeans": jeans_plan,
-                    "total": gls_plan + four_f_plan + jeans_plan
-                })
+                # Sprawdź czy data już istnieje
+                cursor.execute("""
+                    SELECT id, gls, four_f, jeans, total
+                    FROM sales_plans
+                    WHERE date = ?
+                """, (date_str,))
+
+                existing = cursor.fetchone()
+
+                if existing:
+                    # Data istnieje - sprawdź czy wartości się zmieniły
+                    existing_id, existing_gls, existing_4f, existing_jeans, existing_total = existing
+
+                    if (abs(existing_gls - gls_plan) > 0.01 or
+                        abs(existing_4f - four_f_plan) > 0.01 or
+                        abs(existing_jeans - jeans_plan) > 0.01):
+
+                        # Wartości się różnią - aktualizuj
+                        cursor.execute("""
+                            UPDATE sales_plans
+                            SET gls = ?, four_f = ?, jeans = ?, total = ?,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE date = ?
+                        """, (gls_plan, four_f_plan, jeans_plan, total_plan, date_str))
+
+                        updated_count += 1
+                        print(f"Zaktualizowano plan dla {date_str}: GLS={gls_plan}, 4F={four_f_plan}, JEANS={jeans_plan}")
+                    else:
+                        # Wartości się zgadzają - pomiń
+                        skipped_count += 1
+                else:
+                    # Nowa data - dodaj do bazy
+                    cursor.execute("""
+                        INSERT INTO sales_plans (date, gls, four_f, jeans, total)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (date_str, gls_plan, four_f_plan, jeans_plan, total_plan))
+
+                    added_count += 1
+                    print(f"Dodano plan dla {date_str}: GLS={gls_plan}, 4F={four_f_plan}, JEANS={jeans_plan}")
+
+            except Exception as e:
+                print(f"Błąd przetwarzania wiersza: {e}, wiersz: {row}")
+                continue
+
+        conn.commit()
+        conn.close()
+
+        print(f"\nSynchronizacja zakończona:")
+        print(f"  - Dodano: {added_count}")
+        print(f"  - Zaktualizowano: {updated_count}")
+        print(f"  - Pominięto (bez zmian): {skipped_count}")
+
+        return True
+
+    except Exception as e:
+        print(f"Błąd podczas synchronizacji danych z Google Sheets: {e}")
+        return False
+
+
+def get_sales_plans_from_db(start_date=None, end_date=None):
+    """Pobiera plany sprzedażowe z bazy danych z opcjonalnym filtrowaniem dat"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        query = "SELECT date, gls, four_f, jeans, total FROM sales_plans"
+        params = []
+
+        # Dodaj filtrowanie dat jeśli podane
+        if start_date or end_date:
+            conditions = []
+            if start_date:
+                conditions.append("date >= ?")
+                params.append(start_date)
+            if end_date:
+                conditions.append("date <= ?")
+                params.append(end_date)
+
+            query += " WHERE " + " AND ".join(conditions)
+
+        query += " ORDER BY date ASC"
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        conn.close()
+
+        plans = []
+        for row in rows:
+            plans.append({
+                "date": row[0],
+                "gls": float(row[1]),
+                "four_f": float(row[2]),
+                "jeans": float(row[3]),
+                "total": float(row[4])
+            })
 
         return plans
+
     except Exception as e:
-        print(f"Błąd podczas parsowania planów: {e}")
+        print(f"Błąd podczas pobierania planów z bazy: {e}")
         return []
 
 
 @app.get("/api/sales-plans")
 async def get_sales_plans(
-    refresh: bool = False,
+    sync: bool = False,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None
 ):
     """
-    Zwraca plany sprzedażowe
-    - refresh: jeśli True, pobiera świeże dane z Google Sheets
+    Zwraca plany sprzedażowe z bazy danych
+    - sync: jeśli True, synchronizuje dane z Google Sheets przed zwróceniem
     - start_date: opcjonalna data początkowa (format: DD.MM.YYYY)
     - end_date: opcjonalna data końcowa (format: DD.MM.YYYY)
     """
     try:
-        # Jeśli refresh=True lub plik nie istnieje, pobierz z Google Sheets
-        if refresh or not SALES_PLANS_CSV.exists():
-            success = fetch_sales_plans_from_google()
-            if not success and not SALES_PLANS_CSV.exists():
+        # Jeśli sync=True, zsynchronizuj z Google Sheets
+        if sync:
+            success = sync_sales_plans_from_google()
+            if not success:
                 raise HTTPException(
                     status_code=500,
-                    detail="Nie udało się pobrać danych z Google Sheets i brak lokalnego pliku"
+                    detail="Nie udało się zsynchronizować danych z Google Sheets"
                 )
 
-        # Parsuj plany
-        plans = parse_sales_plans()
+        # Pobierz plany z bazy danych
+        plans = get_sales_plans_from_db(start_date, end_date)
 
         if not plans:
             raise HTTPException(
                 status_code=404,
-                detail="Brak danych planów sprzedażowych"
+                detail="Brak danych planów sprzedażowych w bazie"
             )
-
-        # Filtruj po datach jeśli podano
-        if start_date or end_date:
-            filtered_plans = []
-            for plan in plans:
-                plan_date = datetime.strptime(plan['date'], '%d.%m.%Y')
-
-                if start_date:
-                    start = datetime.strptime(start_date, '%d.%m.%Y')
-                    if plan_date < start:
-                        continue
-
-                if end_date:
-                    end = datetime.strptime(end_date, '%d.%m.%Y')
-                    if plan_date > end:
-                        continue
-
-                filtered_plans.append(plan)
-
-            plans = filtered_plans
 
         # Oblicz statystyki
         total_gls = sum(p['gls'] for p in plans)
@@ -1169,34 +1223,40 @@ async def get_sales_plans(
 
 
 @app.get("/api/sales-plans/today")
-async def get_today_sales_plan(refresh: bool = False):
+async def get_today_sales_plan(sync: bool = False):
     """
-    Zwraca plan sprzedażowy na dzisiaj
+    Zwraca plan sprzedażowy na dzisiaj z bazy danych
+    - sync: jeśli True, synchronizuje dane z Google Sheets przed zwróceniem
     """
     try:
-        # Jeśli refresh=True lub plik nie istnieje, pobierz z Google Sheets
-        if refresh or not SALES_PLANS_CSV.exists():
-            fetch_sales_plans_from_google()
+        # Jeśli sync=True, zsynchronizuj z Google Sheets
+        if sync:
+            sync_sales_plans_from_google()
 
-        # Parsuj plany
-        plans = parse_sales_plans()
-
-        if not plans:
-            raise HTTPException(
-                status_code=404,
-                detail="Brak danych planów sprzedażowych"
-            )
-
-        # Znajdź plan na dzisiaj
+        # Pobierz plan na dzisiaj z bazy danych
         today = datetime.now().strftime('%d.%m.%Y')
-        today_plan = None
 
-        for plan in plans:
-            if plan['date'] == today:
-                today_plan = plan
-                break
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-        if not today_plan:
+        cursor.execute("""
+            SELECT date, gls, four_f, jeans, total
+            FROM sales_plans
+            WHERE date = ?
+        """, (today,))
+
+        row = cursor.fetchone()
+        conn.close()
+
+        if row:
+            today_plan = {
+                "date": row[0],
+                "gls": float(row[1]),
+                "four_f": float(row[2]),
+                "jeans": float(row[3]),
+                "total": float(row[4])
+            }
+        else:
             # Jeśli nie ma planu na dzisiaj, zwróć zerowe wartości
             today_plan = {
                 "date": today,
@@ -1204,7 +1264,7 @@ async def get_today_sales_plan(refresh: bool = False):
                 "four_f": 0,
                 "jeans": 0,
                 "total": 0,
-                "note": "Brak planu na dzisiaj"
+                "note": "Brak planu na dzisiaj w bazie danych"
             }
 
         return {
@@ -1221,25 +1281,29 @@ async def get_today_sales_plan(refresh: bool = False):
         )
 
 
-@app.post("/api/sales-plans/refresh")
-async def refresh_sales_plans():
+@app.post("/api/sales-plans/sync")
+async def sync_sales_plans():
     """
-    Wymusza odświeżenie danych z Google Sheets
+    Wymusza synchronizację danych z Google Sheets do bazy danych
+    - Dodaje nowe daty
+    - Aktualizuje istniejące wartości jeśli się zmieniły
+    - Pomija rekordy bez zmian
     """
     try:
-        success = fetch_sales_plans_from_google()
+        success = sync_sales_plans_from_google()
 
         if success:
-            plans = parse_sales_plans()
+            # Pobierz aktualne dane z bazy
+            plans = get_sales_plans_from_db()
             return {
                 "success": True,
-                "message": "Dane zostały odświeżone",
+                "message": "Dane zostały zsynchronizowane z Google Sheets",
                 "count": len(plans)
             }
         else:
             raise HTTPException(
                 status_code=500,
-                detail="Nie udało się pobrać danych z Google Sheets"
+                detail="Nie udało się zsynchronizować danych z Google Sheets"
             )
 
     except HTTPException:
@@ -1247,13 +1311,13 @@ async def refresh_sales_plans():
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Błąd podczas odświeżania danych: {str(e)}"
+            detail=f"Błąd podczas synchronizacji danych: {str(e)}"
         )
 
 
 if __name__ == "__main__":
     import uvicorn
-    PORT = 3002
+    PORT = 5555
     print(f"Backend API działa na http://localhost:{PORT}")
     print(f"Dane pobierane z bazy danych SQLite: {DATABASE_FILE}")
     print(f"Dokumentacja API: http://localhost:{PORT}/docs")

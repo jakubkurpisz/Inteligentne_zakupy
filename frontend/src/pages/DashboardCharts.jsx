@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { TrendingUp, TrendingDown, AlertCircle, Package, DollarSign, ShoppingBag, RefreshCw } from 'lucide-react'
+import { TrendingUp, TrendingDown, AlertCircle, Package, DollarSign, ShoppingBag, RefreshCw, Calendar, Target } from 'lucide-react'
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import { API_BASE_URL } from '../config/api'
 
@@ -8,9 +8,11 @@ function DashboardCharts() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [stats, setStats] = useState(null);
+  const [todayPlan, setTodayPlan] = useState(null);
 
   useEffect(() => {
     fetchDashboardStats();
+    fetchTodayPlan();
   }, []);
 
   const fetchDashboardStats = async () => {
@@ -27,6 +29,21 @@ function DashboardCharts() {
       console.error("Błąd podczas pobierania statystyk dashboardu:", error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchTodayPlan = async () => {
+    try {
+      const response = await fetch(`${API_URL}/api/sales-plans/today`);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const data = await response.json();
+      if (data.success) {
+        setTodayPlan(data.plan);
+      }
+    } catch (error) {
+      console.error("Błąd podczas pobierania planu na dziś:", error);
     }
   };
 
@@ -245,6 +262,58 @@ function DashboardCharts() {
                 ))}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* Plan sprzedażowy na dziś */}
+      {todayPlan && todayPlan.total > 0 && (
+        <div className="card bg-gradient-to-br from-green-50 to-emerald-50 border-2 border-green-200">
+          <div className="flex items-start space-x-4">
+            <div className="w-12 h-12 bg-green-600 rounded-lg flex items-center justify-center flex-shrink-0">
+              <Target className="w-6 h-6 text-white" />
+            </div>
+            <div className="flex-1">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-lg font-semibold text-gray-900">Plan sprzedażowy na dziś</h3>
+                <div className="flex items-center text-sm text-gray-600">
+                  <Calendar className="w-4 h-4 mr-1" />
+                  <span>{todayPlan.date}</span>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div className="bg-white/80 rounded-lg p-4 border border-green-200">
+                  <p className="text-xs text-gray-600 mb-1">Plan GLS</p>
+                  <p className="text-xl font-bold text-gray-900">{formatNumber(todayPlan.gls)} zł</p>
+                  {stats && stats.sales_today && (
+                    <div className="mt-2 text-xs">
+                      <span className={`font-medium ${(stats.sales_today / todayPlan.total * 100) >= 100 ? 'text-green-600' : 'text-orange-600'}`}>
+                        {formatNumber((stats.sales_today / todayPlan.gls * 100), 0)}% realizacji
+                      </span>
+                    </div>
+                  )}
+                </div>
+                <div className="bg-white/80 rounded-lg p-4 border border-green-200">
+                  <p className="text-xs text-gray-600 mb-1">Plan 4F</p>
+                  <p className="text-xl font-bold text-gray-900">{formatNumber(todayPlan.four_f)} zł</p>
+                </div>
+                <div className="bg-white/80 rounded-lg p-4 border border-green-200">
+                  <p className="text-xs text-gray-600 mb-1">Plan JEANS</p>
+                  <p className="text-xl font-bold text-gray-900">{formatNumber(todayPlan.jeans)} zł</p>
+                </div>
+                <div className="bg-white/80 rounded-lg p-4 border-2 border-green-300">
+                  <p className="text-xs text-gray-600 mb-1">Plan RAZEM</p>
+                  <p className="text-2xl font-bold text-green-700">{formatNumber(todayPlan.total)} zł</p>
+                  {stats && stats.sales_today && (
+                    <div className="mt-2 text-xs">
+                      <span className={`font-medium ${(stats.sales_today / todayPlan.total * 100) >= 100 ? 'text-green-600' : 'text-orange-600'}`}>
+                        {formatNumber((stats.sales_today / todayPlan.total * 100), 0)}% realizacji
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       )}

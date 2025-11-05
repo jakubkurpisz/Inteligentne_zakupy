@@ -155,7 +155,7 @@ function SalesAnalysisNew() {
             <h3 className="text-lg font-semibold text-red-900">Błąd pobierania danych</h3>
             <p className="text-red-700 mt-1">{error.message}</p>
             <p className="text-sm text-red-600 mt-2">
-              Upewnij się, że backend działa na porcie 3002 i masz dostęp do bazy danych SQL Server.
+              Upewnij się, że backend działa na porcie 5555 i masz dostęp do bazy danych SQL Server.
             </p>
             <button
               onClick={fetchSalesHistory}

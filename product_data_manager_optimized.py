@@ -71,6 +71,67 @@ def init_db():
         )
     ''')
 
+    # Tabela do przechowywania historii sprzedaży
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sales_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            DataSprzedazy DATE NOT NULL,
+            MagId INTEGER NOT NULL,
+            IloscSprzedana REAL DEFAULT 0,
+            WartoscNetto REAL DEFAULT 0,
+            WartoscBrutto REAL DEFAULT 0,
+            LiczbaTransakcji INTEGER DEFAULT 0,
+            LiczbaProduktow INTEGER DEFAULT 0,
+            LastUpdated TEXT,
+            UNIQUE(DataSprzedazy, MagId)
+        )
+    ''')
+
+    # Tabela do indeksów dla szybszego wyszukiwania
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_sales_history_date
+        ON sales_history(DataSprzedazy)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_sales_history_mag
+        ON sales_history(MagId)
+    ''')
+
+    # Migracja: Dodaj brakujące kolumny jeśli nie istnieją
+    try:
+        # Sprawdź czy kolumny istnieją
+        cursor.execute("PRAGMA table_info(products)")
+        columns = [column[1] for column in cursor.fetchall()]
+
+        # Dodaj kolumny które nie istnieją
+        if 'LastUpdated' not in columns:
+            cursor.execute('ALTER TABLE products ADD COLUMN LastUpdated TEXT')
+            print("Dodano kolumnę LastUpdated")
+
+        if 'LastStanChange' not in columns:
+            cursor.execute('ALTER TABLE products ADD COLUMN LastStanChange TEXT')
+            print("Dodano kolumnę LastStanChange")
+
+        if 'LastPriceChange' not in columns:
+            cursor.execute('ALTER TABLE products ADD COLUMN LastPriceChange TEXT')
+            print("Dodano kolumnę LastPriceChange")
+
+        if 'PreviousStan' not in columns:
+            cursor.execute('ALTER TABLE products ADD COLUMN PreviousStan REAL DEFAULT 0')
+            print("Dodano kolumnę PreviousStan")
+
+        if 'PreviousPrice' not in columns:
+            cursor.execute('ALTER TABLE products ADD COLUMN PreviousPrice REAL DEFAULT 0')
+            print("Dodano kolumnę PreviousPrice")
+
+        if 'IsNew' not in columns:
+            cursor.execute('ALTER TABLE products ADD COLUMN IsNew INTEGER DEFAULT 0')
+            print("Dodano kolumnę IsNew")
+
+    except Exception as e:
+        print(f"Ostrzeżenie podczas migracji: {e}")
+
     conn.commit()
     conn.close()
     print(f"Baza danych SQLite '{DATABASE_FILE}' zainicjowana.")
@@ -366,6 +427,127 @@ def add_csv_data_to_sqlite(csv_url):
     conn_sqlite.close()
     print(f"[CSV] Przetworzono {changes_count} produktow")
 
+# --- Funkcja do synchronizacji historii sprzedaży ---
+def sync_sales_history():
+    """Pobiera historię sprzedaży z SQL Server i zapisuje do SQLite"""
+    server = os.getenv('SQL_SERVER', r'10.101.101.5\INSERTGT')
+    database = os.getenv('SQL_DATABASE', 'Sporting_Leszno')
+    username = os.getenv('SQL_USERNAME', 'zestawienia2')
+    password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
+
+    print("\n[Historia Sprzedaży] Łączenie z bazą danych SQL Server...")
+
+    try:
+        connection = pyodbc.connect(
+            'DRIVER={ODBC Driver 18 for SQL Server};'
+            f'SERVER={server};'
+            f'DATABASE={database};'
+            f'UID={username};'
+            f'PWD={password};'
+            'TrustServerCertificate=yes;'
+            'Connection Timeout=30;'
+        )
+    except pyodbc.Error as conn_err:
+        print(f"[Historia Sprzedaży] Błąd połączenia: {str(conn_err)}")
+        return
+
+    cursor_sql = connection.cursor()
+
+    # Sprawdź czy mamy już jakieś dane w bazie
+    conn_sqlite = sqlite3.connect(DATABASE_FILE)
+    cursor_sqlite_check = conn_sqlite.cursor()
+    cursor_sqlite_check.execute("SELECT MAX(DataSprzedazy) FROM sales_history")
+    last_sync_date = cursor_sqlite_check.fetchone()[0]
+    cursor_sqlite_check.close()
+    conn_sqlite.close()
+
+    # Jeśli to pierwsza synchronizacja, pobierz całą historię
+    # Jeśli nie, pobierz tylko od ostatniej daty synchronizacji
+    if last_sync_date:
+        print(f"[Historia Sprzedaży] Ostatnia synchronizacja: {last_sync_date}")
+        print(f"[Historia Sprzedaży] Pobieranie aktualizacji od {last_sync_date}...")
+        date_filter = f"AND dok_DataWyst >= CAST('{last_sync_date}' AS DATE)"
+    else:
+        print("[Historia Sprzedaży] Pierwsza synchronizacja - pobieranie całej historii...")
+        date_filter = ""
+
+    # Pobierz historię sprzedaży dla magazynów 1, 7, 9
+    query = f"""
+    SELECT
+        CAST(dok_DataWyst AS DATE) AS DataSprzedazy,
+        dok_MagId AS MagId,
+        SUM(CASE
+                WHEN dok_Typ IN (14, 6) THEN -ob_IloscMag
+                ELSE ob_IloscMag
+            END) AS IloscSprzedana,
+        SUM(CASE
+                WHEN dok_Typ IN (14, 6) THEN -ob_WartNetto
+                ELSE ob_WartNetto
+            END) AS WartoscNetto,
+        SUM(CASE
+                WHEN dok_Typ IN (14, 6) THEN -ob_WartBrutto
+                ELSE ob_WartBrutto
+            END) AS WartoscBrutto,
+        COUNT(DISTINCT dok_NrPelny) as LiczbaTransakcji,
+        COUNT(DISTINCT ob_TowId) as LiczbaProduktow
+    FROM
+        vwZstSprzWgKhnt
+    WHERE
+        dok_MagId IN (1, 7, 9)
+        AND dok_Podtyp <> 1
+        AND dok_Status <> 2
+        {date_filter}
+    GROUP BY
+        CAST(dok_DataWyst AS DATE),
+        dok_MagId
+    ORDER BY
+        DataSprzedazy DESC,
+        MagId
+    """
+
+    try:
+        cursor_sql.execute(query)
+        rows = cursor_sql.fetchall()
+
+        # Połącz z SQLite
+        conn_sqlite = sqlite3.connect(DATABASE_FILE)
+        cursor_sqlite = conn_sqlite.cursor()
+
+        now = datetime.now().isoformat()
+        records_count = 0
+
+        for row in rows:
+            # Upsert do tabeli sales_history
+            cursor_sqlite.execute('''
+                INSERT OR REPLACE INTO sales_history
+                (DataSprzedazy, MagId, IloscSprzedana, WartoscNetto, WartoscBrutto,
+                 LiczbaTransakcji, LiczbaProduktow, LastUpdated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                row.DataSprzedazy.strftime('%Y-%m-%d') if row.DataSprzedazy else None,
+                row.MagId,
+                float(row.IloscSprzedana or 0),
+                float(row.WartoscNetto or 0),
+                float(row.WartoscBrutto or 0),
+                int(row.LiczbaTransakcji or 0),
+                int(row.LiczbaProduktow or 0),
+                now
+            ))
+            records_count += 1
+
+        conn_sqlite.commit()
+        conn_sqlite.close()
+
+        cursor_sql.close()
+        connection.close()
+
+        print(f"[Historia Sprzedaży] Zsynchronizowano {records_count} rekordów")
+
+    except Exception as e:
+        print(f"[Historia Sprzedaży] Błąd podczas synchronizacji: {str(e)}")
+        cursor_sql.close()
+        connection.close()
+
 # --- Funkcja do pobierania statystyk ---
 def get_stats():
     conn = sqlite3.connect(DATABASE_FILE)
@@ -410,6 +592,7 @@ def execute_script():
     upload_sql_data_to_sqlite()
     csv_url = 'https://176.32.163.90/ealpinepro2/dane/sporting/stan.csv'
     add_csv_data_to_sqlite(csv_url)
+    sync_sales_history()
 
     # Statystyki
     stats = get_stats()

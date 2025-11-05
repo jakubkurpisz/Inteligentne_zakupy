@@ -6,7 +6,6 @@ import {
   ShoppingCart,
   AlertTriangle,
   Settings,
-  Database,
   Package,
   Calendar
 } from 'lucide-react'
@@ -97,17 +96,6 @@ function Sidebar({ isOpen }) {
           )
         })}
       </nav>
-
-      <div className="absolute bottom-4 left-4 right-4">
-        <div className="bg-gradient-to-br from-primary-500 to-primary-700 rounded-lg p-4 text-white">
-          <Database className="w-8 h-8 mb-2" />
-          <p className="text-sm font-medium">Integracja z Subiekt</p>
-          <p className="text-xs opacity-90 mt-1">Ostatnia synchronizacja: przed 5 min</p>
-          <button className="mt-3 w-full bg-white/20 hover:bg-white/30 text-white text-xs py-2 rounded transition-colors">
-            Synchronizuj dane
-          </button>
-        </div>
-      </div>
     </aside>
   )
 }

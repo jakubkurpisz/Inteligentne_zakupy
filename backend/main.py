@@ -14,10 +14,16 @@ import csv
 import requests
 from io import StringIO
 import socket
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 
 load_dotenv()
 
 app = FastAPI(title="Inteligentne Zakupy API")
+
+# Scheduler dla cyklicznej synchronizacji
+scheduler = BackgroundScheduler()
+sync_lock = threading.Lock()  # Lock do synchronizacji aby nie uruchamiać wielu jednocześnie
 
 # Konfiguracja CORS
 app.add_middleware(
@@ -107,6 +113,59 @@ async def startup_event():
     # Uruchom harmonogram synchronizacji planów (bez natychmiastowego uruchomienia)
     print("[STARTUP] Harmonogram synchronizacji planów zostanie uruchomiony za 30 minut...")
     threading.Thread(target=schedule_sales_plans_sync, daemon=True).start()
+
+
+@app.post("/api/update-database")
+async def update_database_now():
+    """Ręczne uruchomienie aktualizacji bazy danych"""
+    try:
+        print("\n[MANUAL UPDATE] Uruchamiam ręczną aktualizację bazy danych...")
+
+        # Uruchom aktualizację w osobnym wątku, żeby nie blokować API
+        def run_update():
+            run_python_script()
+
+        threading.Thread(target=run_update, daemon=True).start()
+
+        return {
+            "status": "success",
+            "message": "Aktualizacja bazy danych została uruchomiona w tle. Odśwież stronę za ~30 sekund aby zobaczyć zaktualizowane dane.",
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd podczas uruchamiania aktualizacji: {str(e)}"
+        )
+
+
+@app.get("/api/database-status")
+async def get_database_status():
+    """Sprawdza status ostatniej aktualizacji bazy danych"""
+    try:
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        cursor = conn.cursor()
+
+        # Pobierz ostatnią aktualizację
+        cursor.execute("SELECT MAX(LastUpdated) FROM products")
+        last_update = cursor.fetchone()[0]
+
+        # Pobierz liczbę produktów
+        cursor.execute("SELECT COUNT(*) FROM products")
+        total_products = cursor.fetchone()[0]
+
+        conn.close()
+
+        return {
+            "last_update": last_update,
+            "total_products": total_products,
+            "database_path": str(DATABASE_FILE)
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd podczas sprawdzania statusu bazy: {str(e)}"
+        )
 
 
 def get_db_connection():
@@ -673,15 +732,38 @@ async def get_dashboard_stats():
         sql_cursor.execute(query_per_warehouse, today)
         warehouse_rows = sql_cursor.fetchall()
 
-        warehouse_names = {1: 'GLS', 2: 'GLS DEPOZYT', 7: 'JEANS', 9: 'INNE'}
-        warehouse_stats = []
+        warehouse_names = {1: 'GLS', 2: '4F', 7: 'JEANS'}
 
+        # Utwórz słownik z danymi sprzedaży per magazyn
+        sales_by_warehouse = {}
         for row in warehouse_rows:
             mag_id = row.dok_MagId
             wartość = float(row.WartoscBrutto or 0)
             ilosc = float(row.IloscSprzedana or 0)
             transakcje = int(row.LiczbaTransakcji or 0)
             produkty = int(row.LiczbaProduktow or 0)
+
+            sales_by_warehouse[mag_id] = {
+                "wartość": wartość,
+                "ilosc": ilosc,
+                "transakcje": transakcje,
+                "produkty": produkty
+            }
+
+        # Stwórz listę wszystkich magazynów (nawet bez sprzedaży)
+        warehouse_stats = []
+        for mag_id, nazwa in warehouse_names.items():
+            sales = sales_by_warehouse.get(mag_id, {
+                "wartość": 0,
+                "ilosc": 0,
+                "transakcje": 0,
+                "produkty": 0
+            })
+
+            wartość = sales["wartość"]
+            ilosc = sales["ilosc"]
+            transakcje = sales["transakcje"]
+            produkty = sales["produkty"]
 
             # Oblicz UPT (Units Per Transaction)
             upt = round(ilosc / transakcje, 2) if transakcje > 0 else 0
@@ -691,7 +773,7 @@ async def get_dashboard_stats():
 
             warehouse_stats.append({
                 "mag_id": mag_id,
-                "nazwa": warehouse_names.get(mag_id, f"MAG_{mag_id}"),
+                "nazwa": nazwa,
                 "sprzedaz": round(wartość, 2),
                 "ilosc_sprzedana": round(ilosc, 0),
                 "transakcje": transakcje,
@@ -734,430 +816,273 @@ async def get_dashboard_stats():
         )
 
 
+
 @app.get("/api/dead-stock")
 async def get_dead_stock(
-    min_days: Optional[int] = 0,  # Minimum dni bez ruchu
-    min_value: Optional[float] = 0,  # Minimalna wartość zamrożonego kapitału
-    category: Optional[str] = None,  # Filtrowanie po kategorii (Rodzaj)
-    sort_by: Optional[str] = "days_no_movement",  # Sortowanie: days_no_movement, frozen_value, turnover_ratio
-    mag_ids: Optional[str] = None  # Comma-separated mag_ids
+    min_days: Optional[int] = 0,
+    min_value: Optional[float] = 0,
+    category: Optional[str] = None,  # Rodzaj produktu
+    marka: Optional[str] = None,
+    rotation_status: Optional[str] = None,  # NEW, VERY_FAST, FAST, NORMAL, SLOW, VERY_SLOW, DEAD
+    sort_by: Optional[str] = "frozen_value",
+    mag_ids: Optional[str] = None  # Unused for now - all warehouses included in cache
 ):
     """
-    Pobiera dane o martwych stanach magazynowych (Dead Stock)
-    - Oblicza Days of No Movement (DNM) na podstawie LastStanChange
-    - Oblicza wskaźnik rotacji zapasów (Inventory Turnover Ratio)
-    - Oblicza zamrożony kapitał (Frozen Capital)
-    - Kategoryzuje produkty (DEAD, VERY_SLOW, SLOW, NORMAL, FAST)
+    ZOPTYMALIZOWANY endpoint - czyta z pre-computed cache (tabela dead_stock_analysis).
+    Cache jest aktualizowany co 5 minut przez scheduled task w product_data_manager_optimized.py.
+
+    Parametry:
+    - min_days: Minimum dni bez ruchu
+    - min_value: Minimalna wartość zamrożonego kapitału
+    - category: Filtrowanie po kategorii (Rodzaj produktu)
+    - marka: Filtrowanie po marce
+    - rotation_status: Filtrowanie po statusie rotacji
+    - sort_by: Sortowanie (days_no_movement, frozen_value, dni_zapasu)
     """
 
     try:
-        # Połączenie z SQLite
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Pobierz wszystkie produkty z bazy SQLite
-        cursor.execute("SELECT * FROM products")
-        products = cursor.fetchall()
-        conn.close()
+        # Buduj SQL query z filtrami
+        sql_query = "SELECT * FROM dead_stock_analysis WHERE 1=1"
+        params = []
 
-        # Połączenie z SQL Server dla historii sprzedaży
-        server = os.getenv('SQL_SERVER', r'10.101.101.5\INSERTGT')
-        database = os.getenv('SQL_DATABASE', 'Sporting_Leszno')
-        username = os.getenv('SQL_USERNAME', 'zestawienia2')
-        password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
+        # Filtr: minimum dni bez ruchu
+        if min_days > 0:
+            sql_query += " AND DaysNoMovement >= ?"
+            params.append(min_days)
 
-        try:
-            sql_connection = pyodbc.connect(
-                'DRIVER={ODBC Driver 18 for SQL Server};'
-                f'SERVER={server};'
-                f'DATABASE={database};'
-                f'UID={username};'
-                f'PWD={password};'
-                'TrustServerCertificate=yes;'
-                'Connection Timeout=30;'
-            )
-        except pyodbc.Error as conn_err:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Błąd połączenia z SQL Server: {str(conn_err)}"
-            )
+        # Filtr: minimalna wartość zamrożonego kapitału
+        if min_value > 0:
+            sql_query += " AND FrozenValue >= ?"
+            params.append(min_value)
 
-        sql_cursor = sql_connection.cursor()
+        # Filtr: kategoria (Rodzaj produktu)
+        if category:
+            sql_query += " AND Rodzaj = ?"
+            params.append(category)
 
-        # Parsowanie mag_ids
-        if mag_ids:
-            mag_id_list = [int(x.strip()) for x in mag_ids.split(',') if x.strip().isdigit()]
-            mag_id_filter = ','.join(str(x) for x in mag_id_list)
-        else:
-            mag_id_filter = "1,7,9"
+        # Filtr: marka
+        if marka:
+            sql_query += " AND Marka = ?"
+            params.append(marka)
 
-        # Przygotuj zapytanie SQL do pobierania sprzedaży z ostatnich 90 dni dla każdego produktu
-        # Używamy vwZstSprzWgKhnt jak w SPRZEDAZ_DZIENNA.PY
-        sales_query = f"""
-        WITH FilteredTowar AS (
-            SELECT
-                tw_Id,
-                tw_Symbol
-            FROM
-                tw__Towar
-        )
-        SELECT
-            MAX(FilteredTowar.tw_Symbol) AS Symbol,
-            SUM(CASE
-                    WHEN dok_Typ IN (14, 6) THEN -ob_IloscMag
-                    ELSE ob_IloscMag
-                END) AS IloscSprzedana,
-            SUM(CASE
-                    WHEN dok_Typ IN (14, 6) THEN -ob_WartBrutto
-                    ELSE ob_WartBrutto
-                END) AS WartoscSprzedazy,
-            MAX(dok_DataWyst) AS OstatniaSprzedaz
-        FROM
-            vwZstSprzWgKhnt
-        LEFT JOIN
-            FilteredTowar ON ob_TowId = FilteredTowar.tw_Id
-        WHERE
-            CAST(dok_DataWyst AS DATE) >= DATEADD(day, -90, CAST(GETDATE() AS DATE))
-            AND dok_MagId IN ({mag_id_filter})
-            AND dok_Podtyp <> 1
-            AND dok_Status <> 2
-        GROUP BY
-            ob_TowId
-        """
-
-        try:
-            sql_cursor.execute(sales_query)
-            sales_rows = sql_cursor.fetchall()
-        except Exception as e:
-            sql_cursor.close()
-            sql_connection.close()
-            raise HTTPException(
-                status_code=500,
-                detail=f"Błąd zapytania SQL: {str(e)}"
-            )
-
-        # Konwertuj dane sprzedaży na słownik dla szybkiego dostępu
-        sales_data = {}
-        for row in sales_rows:
-            symbol = row.Symbol
-            if symbol:
-                sales_data[symbol] = {
-                    "IloscSprzedana": float(row.IloscSprzedana or 0),
-                    "WartoscSprzedazy": float(row.WartoscSprzedazy or 0),
-                    "OstatniaSprzedaz": row.OstatniaSprzedaz.strftime('%Y-%m-%d') if row.OstatniaSprzedaz else None
-                }
-
-        sql_cursor.close()
-        sql_connection.close()
-
-        # Analiza dead stock
-        dead_stock_items = []
-        today = datetime.now()
-
-        for product in products:
-            product_dict = dict(product)
-            symbol = product_dict.get('Symbol')
-
-            # Bezpieczna konwersja stanu
-            try:
-                stan = float(product_dict.get('Stan') or 0)
-            except (ValueError, TypeError):
-                stan = 0
-
-            # Pomiń produkty z zerowym stanem
-            if stan <= 0:
-                continue
-
-            # Oblicz Days of No Movement (DNM) na podstawie LastStanChange
-            last_stan_change = product_dict.get('LastStanChange')
-            if last_stan_change:
-                try:
-                    last_change_date = datetime.strptime(last_stan_change, '%Y-%m-%d %H:%M:%S')
-                    days_no_movement = (today - last_change_date).days
-                except ValueError:
-                    try:
-                        last_change_date = datetime.strptime(last_stan_change, '%Y-%m-%d')
-                        days_no_movement = (today - last_change_date).days
-                    except ValueError:
-                        days_no_movement = 0
-            else:
-                days_no_movement = 0
-
-            # Pomiń produkty, które nie spełniają minimalnego kryterium dni
-            if days_no_movement < min_days:
-                continue
-
-            # Oblicz zamrożony kapitał (używamy DetalicznaNetto jako kosztu)
-            # W idealnym przypadku powinniśmy użyć ob_WartMag z SQL Server
-            try:
-                price_netto = float(product_dict.get('DetalicznaNetto') or 0)
-            except (ValueError, TypeError):
-                price_netto = 0
-
-            frozen_value = stan * price_netto
-
-            # Pomiń produkty o wartości poniżej minimalnej
-            if frozen_value < min_value:
-                continue
-
-            # Pobierz dane sprzedaży z ostatnich 90 dni
-            sales_info = sales_data.get(symbol, {
-                "IloscSprzedana": 0,
-                "WartoscSprzedazy": 0,
-                "OstatniaSprzedaz": None
-            })
-
-            # Oblicz wskaźnik rotacji (Inventory Turnover Ratio)
-            # Turnover Ratio = Sprzedaż (90 dni) / Średni stan magazynowy
-            # Zakładamy, że średni stan ≈ aktualny stan (uproszczenie)
-            if frozen_value > 0:
-                turnover_ratio = sales_info["WartoscSprzedazy"] / frozen_value
-            else:
-                turnover_ratio = 0
-
-            # Kategoryzacja produktu
-            if days_no_movement >= 180:
-                category_label = "DEAD"
-            elif days_no_movement >= 90:
-                category_label = "VERY_SLOW"
-            elif days_no_movement >= 60:
-                category_label = "SLOW"
-            elif days_no_movement >= 30:
-                category_label = "NORMAL"
-            else:
-                category_label = "FAST"
-
-            # Rekomendacja akcji
-            if category_label == "DEAD" and frozen_value > 1000:
-                recommendation = "WYPRZEDAŻ - Pilna redukcja ceny o 50%+"
-            elif category_label == "DEAD":
-                recommendation = "WYPRZEDAŻ - Redukcja ceny o 30-50%"
-            elif category_label == "VERY_SLOW" and frozen_value > 1000:
-                recommendation = "PROMOCJA - Obniżka ceny o 20-30%"
-            elif category_label == "VERY_SLOW":
-                recommendation = "PROMOCJA - Obniżka ceny o 15-20%"
-            elif category_label == "SLOW":
-                recommendation = "MONITORUJ - Rozważ promocję"
-            else:
-                recommendation = "OK - Brak działań"
-
-            # Filtrowanie po kategorii (Rodzaj)
-            if category and product_dict.get('Rodzaj') != category:
-                continue
-
-            # Bezpieczna konwersja DetalicznaBrutto
-            try:
-                detaliczna_brutto = float(product_dict.get('DetalicznaBrutto') or 0)
-            except (ValueError, TypeError):
-                detaliczna_brutto = 0
-
-            dead_stock_items.append({
-                "Symbol": symbol,
-                "Nazwa": product_dict.get('Nazwa', ''),
-                "Marka": product_dict.get('Marka', ''),
-                "Rodzaj": product_dict.get('Rodzaj', 'Nieznana'),
-                "Stan": stan,
-                "DetalicznaNetto": price_netto,
-                "DetalicznaBrutto": detaliczna_brutto,
-                "LastStanChange": last_stan_change,
-                "DaysNoMovement": days_no_movement,
-                "FrozenValue": frozen_value,
-                "IloscSprzedana90dni": sales_info["IloscSprzedana"],
-                "WartoscSprzedazy90dni": sales_info["WartoscSprzedazy"],
-                "OstatniaSprzedaz": sales_info["OstatniaSprzedaz"],
-                "TurnoverRatio": round(turnover_ratio, 2),
-                "Category": category_label,
-                "Recommendation": recommendation,
-                "Rozmiar": product_dict.get('Rozmiar', ''),
-                "Kolor": product_dict.get('Kolor', ''),
-                "Sezon": product_dict.get('Sezon', '')
-            })
+        # Filtr: status rotacji
+        if rotation_status:
+            sql_query += " AND Category = ?"
+            params.append(rotation_status.upper())
 
         # Sortowanie
-        sort_mapping = {
-            "days_no_movement": lambda x: x["DaysNoMovement"],
-            "frozen_value": lambda x: x["FrozenValue"],
-            "turnover_ratio": lambda x: x["TurnoverRatio"]
-        }
+        sort_column = {
+            "days_no_movement": "DaysNoMovement DESC",
+            "frozen_value": "FrozenValue DESC",
+            "dni_zapasu": "DniZapasu DESC"
+        }.get(sort_by, "DaysNoMovement DESC")
 
-        if sort_by in sort_mapping:
-            dead_stock_items.sort(key=sort_mapping[sort_by], reverse=True)
+        sql_query += f" ORDER BY {sort_column}"
+
+        # Wykonaj zapytanie
+        cursor.execute(sql_query, params)
+        rows = cursor.fetchall()
+        columns = [description[0] for description in cursor.description]
+
+        # Konwertuj do listy słowników
+        items = []
+        for row in rows:
+            item_dict = dict(zip(columns, row))
+            items.append(item_dict)
 
         # Oblicz statystyki
-        total_dead_stock = len(dead_stock_items)
-        total_frozen_value = sum(item["FrozenValue"] for item in dead_stock_items)
-        avg_days_no_movement = sum(item["DaysNoMovement"] for item in dead_stock_items) / total_dead_stock if total_dead_stock > 0 else 0
+        cursor.execute("""
+            SELECT
+                Category,
+                COUNT(*) as count,
+                SUM(FrozenValue) as total_value
+            FROM dead_stock_analysis
+            GROUP BY Category
+        """)
+        category_stats_raw = cursor.fetchall()
 
-        # Statystyki kategorii
         category_stats = {
-            "DEAD": len([x for x in dead_stock_items if x["Category"] == "DEAD"]),
-            "VERY_SLOW": len([x for x in dead_stock_items if x["Category"] == "VERY_SLOW"]),
-            "SLOW": len([x for x in dead_stock_items if x["Category"] == "SLOW"]),
-            "NORMAL": len([x for x in dead_stock_items if x["Category"] == "NORMAL"]),
-            "FAST": len([x for x in dead_stock_items if x["Category"] == "FAST"])
+            "NEW": 0,
+            "NEW_NO_SALES": 0,
+            "NEW_SELLING": 0,
+            "NEW_SLOW": 0,
+            "REPEATED_NO_SALES": 0,
+            "VERY_FAST": 0,
+            "FAST": 0,
+            "NORMAL": 0,
+            "SLOW": 0,
+            "VERY_SLOW": 0,
+            "DEAD": 0
         }
 
+        total_frozen_value = 0
+        for cat_row in category_stats_raw:
+            cat_name = cat_row[0]
+            cat_count = cat_row[1]
+            cat_value = cat_row[2] or 0
+            category_stats[cat_name] = cat_count
+            total_frozen_value += cat_value
+
+        # Oblicz średnią dni bez ruchu dla przefiltrowanych produktów
+        if items:
+            avg_days = sum(item.get('DaysNoMovement', 0) for item in items) / len(items)
+        else:
+            avg_days = 0
+
+        conn.close()
+
         return {
-            "total_items": total_dead_stock,
+            "total_items": len(items),
             "total_frozen_value": round(total_frozen_value, 2),
-            "avg_days_no_movement": round(avg_days_no_movement, 1),
+            "avg_days_no_movement": round(avg_days, 1),
             "category_stats": category_stats,
             "filters": {
                 "min_days": min_days,
                 "min_value": min_value,
                 "category": category,
                 "sort_by": sort_by,
-                "mag_ids": mag_id_filter
+                "mag_ids": mag_ids or "1,2,7,9"
             },
-            "items": dead_stock_items
+            "items": items,
+            "cache_info": {
+                "last_update": items[0].get('LastAnalysisUpdate') if items else None,
+                "is_cached": True
+            }
         }
 
-    except sqlite3.Error as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Błąd bazy danych SQLite: {str(e)}"
-        )
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Nieoczekiwany błąd: {str(e)}"
+            detail=f"Błąd podczas pobierania analizy dead stock: {str(e)}"
         )
 
 
-def sync_sales_plans_from_google():
+@app.get("/api/warehouse-rotation-value")
+async def get_warehouse_rotation_value():
     """
-    Pobiera dane z Google Sheets i synchronizuje z bazą danych.
-    - Sprawdza czy data już istnieje w bazie
-    - Jeśli istnieje, weryfikuje wartości i aktualizuje przy niezgodności
-    - Jeśli nie istnieje, dodaje nowy rekord
+    Zwraca analizę rotacji magazynu pod kątem wartości.
+    Pokazuje wartość zamrożonego kapitału w każdej kategorii rotacji.
     """
-    try:
-        print(f"Pobieranie danych z Google Sheets: {GOOGLE_SHEETS_URL}")
-        response = requests.get(GOOGLE_SHEETS_URL, timeout=10)
-        response.raise_for_status()
-
-        # Parsuj CSV
-        csv_data = StringIO(response.text)
-        reader = csv.DictReader(csv_data)
-
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        added_count = 0
-        updated_count = 0
-        skipped_count = 0
-
-        for row in reader:
-            try:
-                date_str = row['DATA']
-
-                # Zamień przecinki na kropki w liczbach
-                gls_plan = float(row['GLS'].replace(',', '.')) if row['GLS'] else 0
-                four_f_plan = float(row['4F'].replace(',', '.')) if row['4F'] else 0
-                jeans_plan = float(row['JEANS'].replace(',', '.')) if row['JEANS'] else 0
-                total_plan = gls_plan + four_f_plan + jeans_plan
-
-                # Sprawdź czy data już istnieje
-                cursor.execute("""
-                    SELECT id, gls, four_f, jeans, total
-                    FROM sales_plans
-                    WHERE date = ?
-                """, (date_str,))
-
-                existing = cursor.fetchone()
-
-                if existing:
-                    # Data istnieje - sprawdź czy wartości się zmieniły
-                    existing_id, existing_gls, existing_4f, existing_jeans, existing_total = existing
-
-                    if (abs(existing_gls - gls_plan) > 0.01 or
-                        abs(existing_4f - four_f_plan) > 0.01 or
-                        abs(existing_jeans - jeans_plan) > 0.01):
-
-                        # Wartości się różnią - aktualizuj
-                        cursor.execute("""
-                            UPDATE sales_plans
-                            SET gls = ?, four_f = ?, jeans = ?, total = ?,
-                                updated_at = CURRENT_TIMESTAMP
-                            WHERE date = ?
-                        """, (gls_plan, four_f_plan, jeans_plan, total_plan, date_str))
-
-                        updated_count += 1
-                        print(f"Zaktualizowano plan dla {date_str}: GLS={gls_plan}, 4F={four_f_plan}, JEANS={jeans_plan}")
-                    else:
-                        # Wartości się zgadzają - pomiń
-                        skipped_count += 1
-                else:
-                    # Nowa data - dodaj do bazy
-                    cursor.execute("""
-                        INSERT INTO sales_plans (date, gls, four_f, jeans, total)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (date_str, gls_plan, four_f_plan, jeans_plan, total_plan))
-
-                    added_count += 1
-                    print(f"Dodano plan dla {date_str}: GLS={gls_plan}, 4F={four_f_plan}, JEANS={jeans_plan}")
-
-            except Exception as e:
-                print(f"Błąd przetwarzania wiersza: {e}, wiersz: {row}")
-                continue
-
-        conn.commit()
-        conn.close()
-
-        print(f"\nSynchronizacja zakończona:")
-        print(f"  - Dodano: {added_count}")
-        print(f"  - Zaktualizowano: {updated_count}")
-        print(f"  - Pominięto (bez zmian): {skipped_count}")
-
-        return True
-
-    except Exception as e:
-        print(f"Błąd podczas synchronizacji danych z Google Sheets: {e}")
-        return False
-
-
-def get_sales_plans_from_db(start_date=None, end_date=None):
-    """Pobiera plany sprzedażowe z bazy danych z opcjonalnym filtrowaniem dat"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        query = "SELECT date, gls, four_f, jeans, total FROM sales_plans"
-        params = []
+        # Pobierz agregowane dane według kategorii
+        cursor.execute("""
+            SELECT
+                Category,
+                COUNT(*) as ProductCount,
+                SUM(FrozenValue) as TotalValue,
+                SUM(Stan) as TotalQuantity,
+                AVG(DaysNoMovement) as AvgDaysNoMovement,
+                AVG(DniZapasu) as AvgDaysOfStock
+            FROM dead_stock_analysis
+            GROUP BY Category
+            ORDER BY TotalValue DESC
+        """)
 
-        # Dodaj filtrowanie dat jeśli podane
-        if start_date or end_date:
-            conditions = []
-            if start_date:
-                conditions.append("date >= ?")
-                params.append(start_date)
-            if end_date:
-                conditions.append("date <= ?")
-                params.append(end_date)
+        category_rows = cursor.fetchall()
 
-            query += " WHERE " + " AND ".join(conditions)
+        categories = []
+        total_warehouse_value = 0
+        total_products = 0
 
-        query += " ORDER BY date ASC"
+        for row in category_rows:
+            category_data = {
+                "category": row[0],
+                "product_count": row[1],
+                "total_value": round(row[2] or 0, 2),
+                "total_quantity": round(row[3] or 0, 2),
+                "avg_days_no_movement": round(row[4] or 0, 1),
+                "avg_days_of_stock": round(row[5] or 0, 1) if row[5] else None
+            }
+            categories.append(category_data)
+            total_warehouse_value += category_data["total_value"]
+            total_products += category_data["product_count"]
 
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
+        # Dodaj procenty
+        for cat in categories:
+            cat["value_percentage"] = round((cat["total_value"] / total_warehouse_value * 100), 1) if total_warehouse_value > 0 else 0
+            cat["product_percentage"] = round((cat["product_count"] / total_products * 100), 1) if total_products > 0 else 0
+
+        # Pobierz top 10 produktów według wartości w każdej kategorii
+        top_products_by_category = {}
+
+        for cat in categories:
+            cursor.execute("""
+                SELECT Symbol, Nazwa, Marka, Stan, FrozenValue, DaysNoMovement, DateAdded
+                FROM dead_stock_analysis
+                WHERE Category = ?
+                ORDER BY FrozenValue DESC
+                LIMIT 10
+            """, (cat["category"],))
+
+            products = []
+            for p in cursor.fetchall():
+                products.append({
+                    "symbol": p[0],
+                    "nazwa": p[1],
+                    "marka": p[2],
+                    "stan": p[3],
+                    "frozen_value": round(p[4], 2),
+                    "days_no_movement": p[5],
+                    "date_added": p[6]
+                })
+
+            top_products_by_category[cat["category"]] = products
+
+        # Rekomendacje akcji
+        recommendations = []
+
+        for cat in categories:
+            if cat["category"] == "DEAD":
+                recommendations.append({
+                    "category": "DEAD",
+                    "priority": "KRYTYCZNY",
+                    "action": f"Wyprzedaż - {cat['product_count']} produktów zamrożonych na {cat['total_value']:.0f} PLN",
+                    "impact": f"Uwolnienie {cat['total_value']:.0f} PLN kapitału"
+                })
+            elif cat["category"] == "VERY_SLOW":
+                recommendations.append({
+                    "category": "VERY_SLOW",
+                    "priority": "WYSOKI",
+                    "action": f"Promocje - {cat['product_count']} produktów, wartość {cat['total_value']:.0f} PLN",
+                    "impact": f"Przyspieszenie rotacji, uwolnienie {cat['total_value'] * 0.5:.0f} PLN"
+                })
+            elif cat["category"] == "SLOW":
+                recommendations.append({
+                    "category": "SLOW",
+                    "priority": "ŚREDNI",
+                    "action": f"Monitoring - {cat['product_count']} produktów, wartość {cat['total_value']:.0f} PLN",
+                    "impact": "Zapobieganie przejściu do VERY_SLOW"
+                })
+            elif cat["category"] == "VERY_FAST" or cat["category"] == "FAST":
+                recommendations.append({
+                    "category": cat["category"],
+                    "priority": "POZYTYWNY",
+                    "action": f"Zwiększ zamówienia - {cat['product_count']} bestsellerów",
+                    "impact": f"Optymalizacja {cat['total_value']:.0f} PLN kapitału obrotowego"
+                })
+
         conn.close()
 
-        plans = []
-        for row in rows:
-            plans.append({
-                "date": row[0],
-                "gls": float(row[1]),
-                "four_f": float(row[2]),
-                "jeans": float(row[3]),
-                "total": float(row[4])
-            })
-
-        return plans
+        return {
+            "total_warehouse_value": round(total_warehouse_value, 2),
+            "total_products": total_products,
+            "categories": categories,
+            "top_products_by_category": top_products_by_category,
+            "recommendations": recommendations,
+            "last_update": categories[0].get("last_update") if categories else None
+        }
 
     except Exception as e:
-        print(f"Błąd podczas pobierania planów z bazy: {e}")
-        return []
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd podczas analizy rotacji magazynu: {str(e)}"
+        )
 
 
 @app.get("/api/sales-plans")
@@ -1315,10 +1240,396 @@ async def sync_sales_plans():
         )
 
 
+@app.get("/api/purchase-proposals")
+async def get_purchase_proposals(min_stock_days: int = 30):
+    """
+    Zwraca propozycje zakupowe dla suplementów.
+    Oblicza stan minimalny na podstawie średniego zużycia przez ostatnie 90 dni.
+
+    Parametry:
+    - min_stock_days: liczba dni zapasu do obliczenia stanu minimalnego (domyślnie 30)
+
+    Zwraca produkty z przeznaczenia "SUPLEMENTY" z informacjami:
+    - Aktualny stan
+    - Średnie dzienne zużycie (ostatnie 90 dni)
+    - Stan minimalny (średnie zużycie * min_stock_days)
+    - Różnica (stan - stan minimalny)
+    - Status: PONIŻEJ / OK / NADMIAR
+    """
+    try:
+        # Połączenie z SQLite dla stanów magazynowych
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Pobierz produkty z przeznaczenia "SUPLEMENTY" z niestandardowymi okresami zapasu jeśli istnieją
+        cursor.execute("""
+            SELECT p.Symbol, p.Nazwa, p.Stan, p.DetalicznaNetto, p.DetalicznaBrutto,
+                   p.Marka, p.Rozmiar, p.Przeznaczenie, p.JM,
+                   c.custom_period_days, c.notes
+            FROM products p
+            LEFT JOIN custom_stock_periods c ON p.Symbol = c.symbol
+            WHERE UPPER(p.Przeznaczenie) = 'SUPLEMENTY'
+            AND p.Stan >= 0
+        """)
+        products = cursor.fetchall()
+        conn.close()
+
+        if not products:
+            return {
+                "success": True,
+                "total_items": 0,
+                "items": [],
+                "summary": {
+                    "total_products": 0,
+                    "products_below_minimum": 0,
+                    "products_ok": 0,
+                    "products_excess": 0,
+                    "total_purchase_value": 0
+                }
+            }
+
+        # Połączenie z SQL Server dla historii sprzedaży
+        server = os.getenv('SQL_SERVER', r'10.101.101.5\INSERTGT')
+        database = os.getenv('SQL_DATABASE', 'Sporting_Leszno')
+        username = os.getenv('SQL_USERNAME', 'zestawienia2')
+        password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
+
+        try:
+            sql_connection = pyodbc.connect(
+                'DRIVER={ODBC Driver 18 for SQL Server};'
+                f'SERVER={server};'
+                f'DATABASE={database};'
+                f'UID={username};'
+                f'PWD={password};'
+                'TrustServerCertificate=yes;'
+                'Connection Timeout=30;'
+            )
+        except pyodbc.Error as conn_err:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Błąd połączenia z SQL Server: {str(conn_err)}"
+            )
+
+        sql_cursor = sql_connection.cursor()
+
+        # Pobierz sprzedaż z ostatnich 90 dni dla suplementów
+        sales_query = """
+        WITH FilteredTowar AS (
+            SELECT tw_Id, tw_Symbol
+            FROM tw__Towar
+            WHERE UPPER(tw_pole7) = 'SUPLEMENTY'
+        )
+        SELECT
+            MAX(FilteredTowar.tw_Symbol) AS Symbol,
+            SUM(CASE
+                    WHEN dok_Typ IN (14, 6) THEN -ob_IloscMag
+                    ELSE ob_IloscMag
+                END) AS IloscSprzedana
+        FROM vwZstSprzWgKhnt
+        LEFT JOIN FilteredTowar ON ob_TowId = FilteredTowar.tw_Id
+        WHERE
+            CAST(dok_DataWyst AS DATE) >= DATEADD(day, -90, CAST(GETDATE() AS DATE))
+            AND dok_MagId IN (1,2,7,9)
+            AND dok_Podtyp <> 1
+            AND dok_Status <> 2
+        GROUP BY ob_TowId
+        """
+
+        try:
+            sql_cursor.execute(sales_query)
+            sales_rows = sql_cursor.fetchall()
+        except Exception as e:
+            sql_cursor.close()
+            sql_connection.close()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Błąd zapytania SQL: {str(e)}"
+            )
+
+        # Konwertuj dane sprzedaży na słownik
+        sales_data = {}
+        for row in sales_rows:
+            symbol = row.Symbol
+            if symbol:
+                sales_data[symbol] = float(row.IloscSprzedana or 0)
+
+        sql_cursor.close()
+        sql_connection.close()
+
+        # Przygotuj propozycje zakupowe
+        proposals = []
+        products_below_minimum = 0
+        products_ok = 0
+        products_excess = 0
+        total_purchase_value = 0
+
+        for product in products:
+            product_dict = dict(product)
+            symbol = product_dict.get('Symbol')
+            stan = float(product_dict.get('Stan') or 0)
+            custom_period = product_dict.get('custom_period_days')
+            custom_notes = product_dict.get('notes')
+
+            # Pobierz sprzedaż z ostatnich 90 dni
+            sales_90_days = sales_data.get(symbol, 0)
+
+            # Oblicz średnie dzienne zużycie (sprzedaż / 90 dni)
+            avg_daily_usage = sales_90_days / 90.0 if sales_90_days > 0 else 0
+
+            # Użyj niestandardowego okresu jeśli jest zdefiniowany, w przeciwnym razie użyj domyślnego
+            period_days = custom_period if custom_period is not None else min_stock_days
+
+            # Oblicz stan minimalny (średnie zużycie * liczba dni zapasu)
+            min_stock = avg_daily_usage * period_days
+
+            # Oblicz różnicę
+            difference = stan - min_stock
+
+            # Określ status
+            if difference < 0:
+                status = "PONIŻEJ"
+                status_color = "red"
+                products_below_minimum += 1
+            elif difference < min_stock * 0.2:  # Mniej niż 20% powyżej minimum
+                status = "OK"
+                status_color = "green"
+                products_ok += 1
+            else:
+                status = "NADMIAR"
+                status_color = "blue"
+                products_excess += 1
+
+            # Oblicz ile trzeba zamówić (jeśli poniżej minimum)
+            quantity_to_order = abs(difference) if difference < 0 else 0
+
+            # Oblicz wartość zamówienia
+            price_netto = float(product_dict.get('DetalicznaNetto') or 0)
+            order_value = quantity_to_order * price_netto
+
+            if quantity_to_order > 0:
+                total_purchase_value += order_value
+
+            proposals.append({
+                "Symbol": symbol,
+                "Nazwa": product_dict.get('Nazwa', ''),
+                "Marka": product_dict.get('Marka', ''),
+                "Rozmiar": product_dict.get('Rozmiar', ''),
+                "JM": product_dict.get('JM', 'szt.'),
+                "Stan": round(stan, 2),
+                "Sprzedaz90Dni": round(sales_90_days, 2),
+                "SrednieDzienneZuzycie": round(avg_daily_usage, 2),
+                "StanMinimalny": round(min_stock, 2),
+                "Roznica": round(difference, 2),
+                "Status": status,
+                "StatusColor": status_color,
+                "IloscDoZamowienia": round(quantity_to_order, 2),
+                "CenaNetto": price_netto,
+                "CenaBrutto": float(product_dict.get('DetalicznaBrutto') or 0),
+                "WartoscZamowienia": round(order_value, 2),
+                "CustomPeriodDays": custom_period,
+                "CustomNotes": custom_notes,
+                "ActualPeriodDays": period_days
+            })
+
+        # Sortuj: najpierw poniżej minimum, potem po największej różnicy
+        proposals.sort(key=lambda x: (
+            0 if x["Status"] == "PONIŻEJ" else 1 if x["Status"] == "OK" else 2,
+            x["Roznica"]
+        ))
+
+        return {
+            "success": True,
+            "total_items": len(proposals),
+            "min_stock_days": min_stock_days,
+            "items": proposals,
+            "summary": {
+                "total_products": len(proposals),
+                "products_below_minimum": products_below_minimum,
+                "products_ok": products_ok,
+                "products_excess": products_excess,
+                "total_purchase_value": round(total_purchase_value, 2)
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd podczas generowania propozycji zakupowych: {str(e)}"
+        )
+
+
+@app.post("/api/purchase-proposals/custom-period")
+async def save_custom_stock_period(symbol: str, custom_period_days: int, notes: str = None):
+    """
+    Zapisuje niestandardowy okres zapasu dla produktu.
+
+    Parametry:
+    - symbol: symbol produktu
+    - custom_period_days: liczba dni zapasu (1-365)
+    - notes: opcjonalna notatka
+    """
+    try:
+        # Walidacja
+        if not symbol or symbol.strip() == "":
+            raise HTTPException(status_code=400, detail="Symbol produktu jest wymagany")
+
+        if custom_period_days < 1 or custom_period_days > 365:
+            raise HTTPException(status_code=400, detail="Okres zapasu musi być między 1 a 365 dni")
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Sprawdź czy produkt istnieje
+        cursor.execute("SELECT Symbol FROM products WHERE Symbol = ?", (symbol,))
+        if not cursor.fetchone():
+            conn.close()
+            raise HTTPException(status_code=404, detail=f"Produkt {symbol} nie istnieje")
+
+        # Zapisz lub zaktualizuj niestandardowy okres
+        cursor.execute("""
+            INSERT INTO custom_stock_periods (symbol, custom_period_days, notes, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(symbol) DO UPDATE SET
+                custom_period_days = excluded.custom_period_days,
+                notes = excluded.notes,
+                updated_at = CURRENT_TIMESTAMP
+        """, (symbol, custom_period_days, notes))
+
+        conn.commit()
+        conn.close()
+
+        return {
+            "success": True,
+            "message": f"Zapisano niestandardowy okres {custom_period_days} dni dla produktu {symbol}",
+            "data": {
+                "symbol": symbol,
+                "custom_period_days": custom_period_days,
+                "notes": notes
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd podczas zapisywania niestandardowego okresu: {str(e)}"
+        )
+
+
+@app.delete("/api/purchase-proposals/custom-period/{symbol}")
+async def delete_custom_stock_period(symbol: str):
+    """
+    Usuwa niestandardowy okres zapasu dla produktu.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("DELETE FROM custom_stock_periods WHERE symbol = ?", (symbol,))
+        rows_deleted = cursor.rowcount
+
+        conn.commit()
+        conn.close()
+
+        if rows_deleted == 0:
+            return {
+                "success": True,
+                "message": f"Brak niestandardowego okresu dla produktu {symbol}"
+            }
+
+        return {
+            "success": True,
+            "message": f"Usunięto niestandardowy okres dla produktu {symbol}"
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd podczas usuwania niestandardowego okresu: {str(e)}"
+        )
+
+
+def run_data_sync():
+    """Funkcja uruchamiająca synchronizację danych"""
+    if not sync_lock.acquire(blocking=False):
+        print("[!] Synchronizacja już trwa - pomijam")
+        return
+
+    try:
+        print("\n" + "="*60)
+        print(f"Synchronizacja danych: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("="*60)
+
+        script_path = os.path.join(os.path.dirname(__file__), '..', 'product_data_manager_optimized.py')
+        result = subprocess.run(
+            [sys.executable, script_path],
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 minut timeout
+        )
+
+        if result.returncode == 0:
+            print("[OK] Synchronizacja zakończona pomyślnie")
+            # Wyświetl tylko ostatnie 10 linii outputu aby nie zaśmiecać konsoli
+            lines = result.stdout.strip().split('\n')
+            if len(lines) > 10:
+                print("...")
+                print('\n'.join(lines[-10:]))
+            else:
+                print(result.stdout)
+        else:
+            print("[!] Synchronizacja zakończyła się z błędem")
+            print(result.stderr)
+
+        print("="*60 + "\n")
+
+    except subprocess.TimeoutExpired:
+        print("[!] Synchronizacja przekroczyła limit czasu (5 minut)")
+        print("="*60 + "\n")
+    except Exception as e:
+        print(f"[!] Błąd podczas synchronizacji: {e}")
+        print("="*60 + "\n")
+    finally:
+        sync_lock.release()
+
+
 if __name__ == "__main__":
     import uvicorn
+    import sys
+
     PORT = 5555
-    print(f"Backend API działa na http://localhost:{PORT}")
-    print(f"Dane pobierane z bazy danych SQLite: {DATABASE_FILE}")
-    print(f"Dokumentacja API: http://localhost:{PORT}/docs")
-    uvicorn.run(app, host="0.0.0.0", port=PORT)  # Udostępnij w sieci lokalnej
+    print(f"Backend API - Inteligentne Zakupy")
+    print(f"Adres: http://localhost:{PORT}")
+    print(f"Baza danych: {DATABASE_FILE}")
+    print(f"Dokumentacja: http://localhost:{PORT}/docs")
+
+    # Uruchom synchronizację danych przy starcie serwera
+    print("\n" + "="*60)
+    print("POCZĄTKOWA SYNCHRONIZACJA DANYCH")
+    print("="*60)
+    run_data_sync()
+
+    # Skonfiguruj cykliczną synchronizację co godzinę
+    scheduler.add_job(
+        run_data_sync,
+        trigger=IntervalTrigger(hours=1),
+        id='data_sync_job',
+        name='Synchronizacja danych co godzinę',
+        replace_existing=True
+    )
+    scheduler.start()
+    print(f"\n[OK] Zaplanowano automatyczną synchronizację danych co 1 godzinę")
+
+    print("\n" + "="*60)
+    print(f"URUCHAMIANIE SERWERA API")
+    print("="*60 + "\n")
+
+    try:
+        uvicorn.run(app, host="0.0.0.0", port=PORT)
+    except (KeyboardInterrupt, SystemExit):
+        print("\n\nZamykanie serwera...")
+        scheduler.shutdown()
+        print("[OK] Scheduler zatrzymany")

@@ -11,6 +11,7 @@ function SalesAnalysis() {
 
   const [monthlyData, setMonthlyData] = useState([]);
   const [categoryData, setCategoryData] = useState([]);
+  const [groupData, setGroupData] = useState([]);
   const [dailyTransactionsData, setDailyTransactionsData] = useState([]);
 
   const [salesSummary, setSalesSummary] = useState({
@@ -91,6 +92,29 @@ function SalesAnalysis() {
           color: getRandomColor(), // Funkcja do generowania losowych kolorów
         }));
         setCategoryData(processedCategoryData);
+
+        // Przetwarzanie danych dla wykresu grup
+        const groupSalesMap = data.reduce((acc, item) => {
+          const group = item.Grupa || 'Brak grupy';
+          const nettoValue = parseFloat(item.DetalicznaNetto || 0) * parseFloat(item.Stan || 0);
+          if (!acc[group]) {
+            acc[group] = 0;
+          }
+          acc[group] += nettoValue;
+          return acc;
+        }, {});
+
+        const totalGroupSales = Object.values(groupSalesMap).reduce((sum, value) => sum + value, 0);
+        const processedGroupData = Object.entries(groupSalesMap)
+          .map(([name, value]) => ({
+            name,
+            value: parseFloat(((value / totalGroupSales) * 100).toFixed(2)),
+            absoluteValue: value,
+            color: getRandomColor(),
+          }))
+          .sort((a, b) => b.absoluteValue - a.absoluteValue)
+          .slice(0, 10); // Top 10 grup
+        setGroupData(processedGroupData);
     
         // Przetwarzanie danych dla rozkładu transakcji w ciągu dnia (teraz dziennego)
         const dailyTransactionsMap = data.reduce((acc, item) => {
@@ -210,6 +234,32 @@ function SalesAnalysis() {
             </PieChart>
           </ResponsiveContainer>
         </div>
+      </div>
+
+      {/* Wykres grup produktów */}
+      <div className="card">
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">Top 10 Grup produktów (wartość w magazynie)</h2>
+        <ResponsiveContainer width="100%" height={300}>
+          <BarChart data={groupData}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="name" angle={-45} textAnchor="end" height={100} />
+            <YAxis />
+            <Tooltip
+              formatter={(value, name, props) => {
+                if (name === 'wartość') {
+                  return [`${props.payload.absoluteValue.toFixed(2)} zł (${value}%)`, 'Wartość'];
+                }
+                return [value, name];
+              }}
+            />
+            <Legend />
+            <Bar dataKey="value" fill="#10b981" name="wartość">
+              {groupData.map((entry, index) => (
+                <Cell key={`cell-${index}`} fill={entry.color} />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
       </div>
 
       {/* Analiza dzienna (zamiast godzinowej) */}

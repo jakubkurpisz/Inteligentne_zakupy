@@ -7,7 +7,9 @@ import {
   AlertTriangle,
   Settings,
   Package,
-  Calendar
+  Calendar,
+  ClipboardList,
+  DollarSign
 } from 'lucide-react'
 
 const menuItems = [
@@ -42,10 +44,22 @@ const menuItems = [
     description: 'Rekomendacje AI'
   },
   {
+    path: '/purchase-proposals',
+    icon: ClipboardList,
+    label: 'Propozycje Zakupowe',
+    description: 'Suplementy - stany min.'
+  },
+  {
     path: '/dead-stock',
     icon: AlertTriangle,
     label: 'Martwe Stany',
     description: 'Analiza rotacji zapasów'
+  },
+  {
+    path: '/warehouse-rotation',
+    icon: DollarSign,
+    label: 'Rotacja Magazynu',
+    description: 'Analiza wartości'
   },
   {
     path: '/sales-plans',

@@ -332,6 +332,7 @@ function StanyMagazynowe() {
                 <th className="py-3 px-4 border-b text-left text-sm font-semibold text-gray-600">Symbol</th>
                 <th className="py-3 px-4 border-b text-left text-sm font-semibold text-gray-600">Nazwa</th>
                 <th className="py-3 px-4 border-b text-left text-sm font-semibold text-gray-600">Marka</th>
+                <th className="py-3 px-4 border-b text-left text-sm font-semibold text-gray-600">Grupa</th>
                 <th className="py-3 px-4 border-b text-left text-sm font-semibold text-gray-600">Stan</th>
                 <th className="py-3 px-4 border-b text-left text-sm font-semibold text-gray-600">Cena Netto</th>
                 <th className="py-3 px-4 border-b text-left text-sm font-semibold text-gray-600">Cena Brutto</th>
@@ -345,6 +346,7 @@ function StanyMagazynowe() {
                   <td className="py-2 px-4 border-b text-sm text-gray-700">{product.Symbol}</td>
                   <td className="py-2 px-4 border-b text-sm text-gray-700">{product.Nazwa}</td>
                   <td className="py-2 px-4 border-b text-sm text-gray-700">{product.Marka}</td>
+                  <td className="py-2 px-4 border-b text-sm text-gray-700">{product.Grupa || '-'}</td>
                   <td className="py-2 px-4 border-b text-sm text-gray-700">{formatNumber(parseFloat(product.Stan || 0), 0)}</td>
                   <td className="py-2 px-4 border-b text-sm text-gray-700">{formatNumber(parseFloat(product.DetalicznaNetto || 0))} zł</td>
                   <td className="py-2 px-4 border-b text-sm text-gray-700">{formatNumber(parseFloat(product.DetalicznaBrutto || 0))} zł</td>

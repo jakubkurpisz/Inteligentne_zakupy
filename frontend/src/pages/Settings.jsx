@@ -1,6 +1,48 @@
 import { Database, Bell, Shield, Sliders, Save, RefreshCw } from 'lucide-react'
+import { useState } from 'react'
+
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5555'
 
 function Settings() {
+  const [isRefreshing, setIsRefreshing] = useState(false)
+  const [refreshMessage, setRefreshMessage] = useState('')
+  const [refreshStatus, setRefreshStatus] = useState(null)
+
+  const handleRefreshDatabase = async () => {
+    setIsRefreshing(true)
+    setRefreshMessage('')
+    setRefreshStatus(null)
+
+    try {
+      const response = await fetch(`${API_URL}/api/update-database`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      })
+
+      const data = await response.json()
+
+      if (response.ok) {
+        setRefreshMessage(data.message || 'Baza danych została pomyślnie odświeżona!')
+        setRefreshStatus('success')
+      } else {
+        setRefreshMessage(data.detail || 'Wystąpił błąd podczas odświeżania bazy danych')
+        setRefreshStatus('error')
+      }
+    } catch (error) {
+      setRefreshMessage('Błąd połączenia z serwerem: ' + error.message)
+      setRefreshStatus('error')
+    } finally {
+      setIsRefreshing(false)
+      // Automatycznie ukryj komunikat po 10 sekundach
+      setTimeout(() => {
+        setRefreshMessage('')
+        setRefreshStatus(null)
+      }, 10000)
+    }
+  }
+
   return (
     <div className="space-y-6">
       {/* Nagłówek */}
@@ -60,10 +102,29 @@ function Settings() {
             </div>
           </div>
 
+          {/* Komunikat statusu odświeżania */}
+          {refreshMessage && (
+            <div
+              className={`p-4 rounded-lg ${
+                refreshStatus === 'success'
+                  ? 'bg-green-50 border border-green-200 text-green-800'
+                  : 'bg-red-50 border border-red-200 text-red-800'
+              }`}
+            >
+              <p className="text-sm font-medium">{refreshMessage}</p>
+            </div>
+          )}
+
           <div className="flex items-center justify-between pt-4 border-t border-gray-200">
-            <button className="btn-secondary flex items-center space-x-2">
-              <RefreshCw className="w-4 h-4" />
-              <span>Testuj połączenie</span>
+            <button
+              onClick={handleRefreshDatabase}
+              disabled={isRefreshing}
+              className={`btn-secondary flex items-center space-x-2 ${
+                isRefreshing ? 'opacity-50 cursor-not-allowed' : ''
+              }`}
+            >
+              <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+              <span>{isRefreshing ? 'Odświeżanie...' : 'Odśwież bazę danych'}</span>
             </button>
             <button className="btn-primary flex items-center space-x-2">
               <Save className="w-4 h-4" />
@@ -182,7 +243,7 @@ function Settings() {
                 <p className="font-medium text-gray-900">Wykrycie martwych zapasów</p>
                 <input type="checkbox" className="w-4 h-4 text-primary-600" defaultChecked />
               </div>
-              <p className="text-sm text-gray-500">Alert gdy produkt nie sprzedaje się >90 dni</p>
+              <p className="text-sm text-gray-500">Alert gdy produkt nie sprzedaje się &gt;90 dni</p>
             </div>
 
             <div className="p-4 bg-gray-50 rounded-lg">

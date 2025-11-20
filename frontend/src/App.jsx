@@ -6,7 +6,9 @@ import StanyMagazynowe from './pages/StanyMagazynowe'
 import DemandForecast from './pages/DemandForecast'
 import PurchaseSuggestions from './pages/PurchaseSuggestions'
 import DeadStock from './pages/DeadStock'
+import WarehouseRotation from './pages/WarehouseRotation'
 import SalesPlans from './pages/SalesPlans'
+import PurchaseProposals from './pages/PurchaseProposals'
 import Settings from './pages/Settings'
 
 function App() {
@@ -19,7 +21,9 @@ function App() {
           <Route path="/stany-magazynowe" element={<StanyMagazynowe />} />
           <Route path="/demand-forecast" element={<DemandForecast />} />
           <Route path="/purchase-suggestions" element={<PurchaseSuggestions />} />
+          <Route path="/purchase-proposals" element={<PurchaseProposals />} />
           <Route path="/dead-stock" element={<DeadStock />} />
+          <Route path="/warehouse-rotation" element={<WarehouseRotation />} />
           <Route path="/sales-plans" element={<SalesPlans />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>

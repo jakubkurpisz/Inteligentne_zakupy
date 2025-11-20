@@ -1,5 +1,5 @@
 import pyodbc
-from datetime import datetime
+from datetime import datetime, date
 from decimal import Decimal
 import time
 import requests
@@ -9,10 +9,13 @@ import sys
 import os
 import sqlite3
 from dotenv import load_dotenv
+from pathlib import Path
 
 load_dotenv()
 
-DATABASE_FILE = 'product_states.db'
+# Use absolute path to match main.py
+SCRIPT_DIR = Path(__file__).parent
+DATABASE_FILE = SCRIPT_DIR / 'product_states.db'
 
 # --- Funkcja pomocnicza do wyciągania ModelSP ---
 def extract_model_sp(value):
@@ -54,7 +57,8 @@ def init_db():
             LastPriceChange TEXT,
             PreviousStan REAL DEFAULT 0,
             PreviousPrice REAL DEFAULT 0,
-            IsNew INTEGER DEFAULT 0
+            IsNew INTEGER DEFAULT 0,
+            DateAdded TEXT
         )
     ''')
 
@@ -98,13 +102,104 @@ def init_db():
         ON sales_history(MagId)
     ''')
 
+    # Tabela cache dla analizy dead stock (pre-computed)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS dead_stock_analysis (
+            Symbol TEXT PRIMARY KEY,
+            Nazwa TEXT,
+            Marka TEXT,
+            Rodzaj TEXT,
+            Stan REAL,
+            DetalicznaNetto REAL,
+            DetalicznaBrutto REAL,
+            LastStanChange TEXT,
+            DaysNoMovement INTEGER,
+            FrozenValue REAL,
+            SprzedazRoczna REAL,
+            SredniaDziennaSprzedaz REAL,
+            DniZapasu REAL,
+            OstatniaSprzedaz TEXT,
+            Category TEXT,
+            Recommendation TEXT,
+            Rozmiar TEXT,
+            Kolor TEXT,
+            Sezon TEXT,
+            ProductAge INTEGER,
+            LastAnalysisUpdate TEXT,
+            FOREIGN KEY (Symbol) REFERENCES products(Symbol)
+        )
+    ''')
+
+    # Indeksy dla dead_stock_analysis
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_dead_stock_category
+        ON dead_stock_analysis(Category)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_dead_stock_marka
+        ON dead_stock_analysis(Marka)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_dead_stock_rodzaj
+        ON dead_stock_analysis(Rodzaj)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_dead_stock_days
+        ON dead_stock_analysis(DaysNoMovement)
+    ''')
+
+    # Tabela do przechowywania planów sprzedażowych z Google Sheets
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sales_plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL UNIQUE,
+            gls REAL DEFAULT 0,
+            four_f REAL DEFAULT 0,
+            jeans REAL DEFAULT 0,
+            total REAL DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # Indeks dla sales_plans
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_sales_plans_date
+        ON sales_plans(date)
+    ''')
+
+    # Tabela do przechowywania niestandardowych okresów zapasu dla produktów
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS custom_stock_periods (
+            symbol TEXT PRIMARY KEY,
+            custom_period_days INTEGER NOT NULL,
+            notes TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (symbol) REFERENCES products(Symbol)
+        )
+    ''')
+
+    # Indeks dla custom_stock_periods
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_custom_stock_periods_symbol
+        ON custom_stock_periods(symbol)
+    ''')
+
     # Migracja: Dodaj brakujące kolumny jeśli nie istnieją
     try:
-        # Sprawdź czy kolumny istnieją
+        # Sprawdź czy kolumny istnieją w products
         cursor.execute("PRAGMA table_info(products)")
         columns = [column[1] for column in cursor.fetchall()]
 
         # Dodaj kolumny które nie istnieją
+        if 'Grupa' not in columns:
+            cursor.execute('ALTER TABLE products ADD COLUMN Grupa TEXT')
+            print("Dodano kolumnę Grupa")
+
         if 'LastUpdated' not in columns:
             cursor.execute('ALTER TABLE products ADD COLUMN LastUpdated TEXT')
             print("Dodano kolumnę LastUpdated")
@@ -128,6 +223,36 @@ def init_db():
         if 'IsNew' not in columns:
             cursor.execute('ALTER TABLE products ADD COLUMN IsNew INTEGER DEFAULT 0')
             print("Dodano kolumnę IsNew")
+
+        if 'DateAdded' not in columns:
+            cursor.execute('ALTER TABLE products ADD COLUMN DateAdded TEXT')
+            # Dla istniejących produktów ustaw DateAdded na LastUpdated (najlepsza dostępna aproksymacja)
+            cursor.execute('UPDATE products SET DateAdded = LastUpdated WHERE DateAdded IS NULL')
+            print("Dodano kolumnę DateAdded")
+
+        # Sprawdź kolumny w dead_stock_analysis
+        cursor.execute("PRAGMA table_info(dead_stock_analysis)")
+        dead_stock_columns = [column[1] for column in cursor.fetchall()]
+
+        if 'HadZeroStock' not in dead_stock_columns:
+            cursor.execute('ALTER TABLE dead_stock_analysis ADD COLUMN HadZeroStock INTEGER DEFAULT 0')
+            print("Dodano kolumnę HadZeroStock do dead_stock_analysis")
+
+        if 'LastZeroDate' not in dead_stock_columns:
+            cursor.execute('ALTER TABLE dead_stock_analysis ADD COLUMN LastZeroDate TEXT')
+            print("Dodano kolumnę LastZeroDate do dead_stock_analysis")
+
+        if 'DaysSinceLastZero' not in dead_stock_columns:
+            cursor.execute('ALTER TABLE dead_stock_analysis ADD COLUMN DaysSinceLastZero INTEGER')
+            print("Dodano kolumnę DaysSinceLastZero do dead_stock_analysis")
+
+        if 'TotalDeliveries' not in dead_stock_columns:
+            cursor.execute('ALTER TABLE dead_stock_analysis ADD COLUMN TotalDeliveries INTEGER')
+            print("Dodano kolumnę TotalDeliveries do dead_stock_analysis")
+
+        if 'SalesAfterLastDelivery' not in dead_stock_columns:
+            cursor.execute('ALTER TABLE dead_stock_analysis ADD COLUMN SalesAfterLastDelivery REAL')
+            print("Dodano kolumnę SalesAfterLastDelivery do dead_stock_analysis")
 
     except Exception as e:
         print(f"Ostrzeżenie podczas migracji: {e}")
@@ -189,6 +314,7 @@ def upsert_product(cursor, symbol, product_data, source='SQL'):
                 Kolor = ?,
                 Przeznaczenie = ?,
                 Rodzaj = ?,
+                Grupa = ?,
                 LastUpdated = ?,
                 LastStanChange = ?,
                 LastPriceChange = ?,
@@ -214,6 +340,7 @@ def upsert_product(cursor, symbol, product_data, source='SQL'):
             product_data['Kolor'],
             product_data['Przeznaczenie'],
             product_data['Rodzaj'],
+            product_data.get('Grupa', ''),
             now,
             now if stan_changed else old_last_stan_change,
             now if price_changed else old_last_price_change,
@@ -243,10 +370,10 @@ def upsert_product(cursor, symbol, product_data, source='SQL'):
             INSERT INTO products (
                 Symbol, Nazwa, Stan, JM, DetalicznaNetto, DetalicznaBrutto,
                 CenaPromocyjna, Opis, Uwagi, Model, Rozmiar, Marka, ModelSP,
-                Sezon, Plec, Kolor, Przeznaczenie, Rodzaj,
+                Sezon, Plec, Kolor, Przeznaczenie, Rodzaj, Grupa,
                 LastUpdated, LastStanChange, LastPriceChange,
-                PreviousStan, PreviousPrice, IsNew
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                PreviousStan, PreviousPrice, IsNew, DateAdded
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             symbol,
             product_data['Nazwa'],
@@ -266,12 +393,14 @@ def upsert_product(cursor, symbol, product_data, source='SQL'):
             product_data['Kolor'],
             product_data['Przeznaczenie'],
             product_data['Rodzaj'],
+            product_data.get('Grupa', ''),
             now,
             now,
             now,
             0,
             0,
-            1  # IsNew = 1 dla nowych produktów
+            1,  # IsNew = 1 dla nowych produktów
+            now  # DateAdded - data dodania do bazy
         ))
 
         cursor.execute('''
@@ -321,13 +450,15 @@ def upload_sql_data_to_sqlite():
            tw_pole5 AS Plec,
            tw_pole6 AS Kolor,
            tw_pole7 AS Przeznaczenie,
-           tw_pole8 AS Rodzaj
+           tw_pole8 AS Rodzaj,
+           COALESCE(sl_Nazwa, '') AS Grupa
     FROM tw_Stan
     LEFT JOIN tw__Towar ON st_TowId = tw_Id
     LEFT JOIN tw_Cena ON st_TowId = tc_IdTowar
+    LEFT JOIN sl__Slownik ON tw_IdGrupa = sl_Id
     WHERE st_Stan > 0 AND st_MagId IN (1, 3, 7, 9)
     GROUP BY Tw_Symbol, Tw_Nazwa, st_MagId, tw_Pole2, tw_Opis, tw_pole1, tw_pole3,
-             tw_pole6, tw_pole5, tw_pole4, tw_pole7, tw_pole8, tc_CenaNetto1, tc_CenaBrutto1, tw_Uwagi
+             tw_pole6, tw_pole5, tw_pole4, tw_pole7, tw_pole8, sl_Nazwa, tc_CenaNetto1, tc_CenaBrutto1, tw_Uwagi
     """
     cursor.execute(query)
     rows = cursor.fetchall()
@@ -359,6 +490,7 @@ def upload_sql_data_to_sqlite():
             'Kolor': row.Kolor,
             'Przeznaczenie': row.Przeznaczenie,
             'Rodzaj': row.Rodzaj,
+            'Grupa': row.Grupa,
         }
 
         upsert_product(cursor_sqlite, row.Symbol, product_data, 'SQL')
@@ -548,6 +680,286 @@ def sync_sales_history():
         cursor_sql.close()
         connection.close()
 
+# --- Funkcja do pobierania szczegółowej historii dostaw i rotacji ---
+def get_detailed_product_rotation():
+    """
+    Pobiera szczegółową historię dostaw (PZ) i sprzedaży dla każdego produktu.
+    Analizuje rotację MIĘDZY dostawami i wykrywa produkty które nie sprzedają się
+    pomimo że poprzednie partie zeszły.
+
+    Zwraca słownik z następującymi informacjami dla każdego produktu:
+    - deliveries: lista dostaw
+    - rotation_analysis: analiza rotacji między dostawami
+    - has_zero_stock_history: czy był moment zerowego stanu
+    - last_zero_date: data ostatniego zerowego stanu
+    - sales_after_last_delivery: sprzedaż po ostatniej dostawie
+    """
+    try:
+        print("\n[Rotacja Dostaw] Łączenie z bazą danych SQL Server...")
+        connection = pyodbc.connect(
+            'DRIVER={ODBC Driver 18 for SQL Server};'
+            f'SERVER={os.getenv("SQL_SERVER")};'
+            f'DATABASE={os.getenv("SQL_DATABASE")};'
+            f'UID={os.getenv("SQL_USERNAME")};'
+            f'PWD={os.getenv("SQL_PASSWORD")};'
+            'TrustServerCertificate=yes;'
+            'Connection Timeout=30;'
+        )
+        cursor_sql = connection.cursor()
+
+        # Pobierz WSZYSTKIE dostawy PZ (typ 17) z ostatnich 365 dni
+        deliveries_query = """
+        SELECT
+            tw.tw_Symbol AS Symbol,
+            d.dok_DataWyst AS DataDostawy,
+            dp.ob_IloscMag AS Ilosc,
+            d.dok_Id AS DokumentId
+        FROM
+            dok__Dokument d
+        INNER JOIN
+            dok_Pozycja dp ON d.dok_Id = dp.ob_DokMagId
+        INNER JOIN
+            tw__Towar tw ON dp.ob_TowId = tw.tw_Id
+        WHERE
+            d.dok_Typ = 17  -- PZ (przyjęcie zewnętrzne)
+            AND d.dok_DataWyst >= DATEADD(day, -365, GETDATE())
+            AND d.dok_MagId IN (1, 7, 9)
+            AND d.dok_Status <> 2
+        ORDER BY
+            tw.tw_Symbol, d.dok_DataWyst
+        """
+
+        cursor_sql.execute(deliveries_query)
+        deliveries = cursor_sql.fetchall()
+
+        print(f"[Rotacja Dostaw] Pobrano {len(deliveries)} dostaw")
+
+        # Grupuj dostawy po produktach
+        product_deliveries = {}
+        for row in deliveries:
+            symbol = row.Symbol
+            if symbol not in product_deliveries:
+                product_deliveries[symbol] = {
+                    'deliveries': [],
+                    'has_zero_stock_history': False,
+                    'last_zero_date': None,
+                    'rotation_analysis': None
+                }
+
+            product_deliveries[symbol]['deliveries'].append({
+                'date': row.DataDostawy,
+                'quantity': float(row.Ilosc or 0),
+                'doc_id': row.DokumentId
+            })
+
+        # Pobierz WSZYSTKIE sprzedaże jednym zapytaniem (optymalizacja!)
+        print(f"[Rotacja Dostaw] Pobieram historię sprzedaży...")
+        all_sales_query = """
+        SELECT
+            tw.tw_Symbol AS Symbol,
+            CAST(d.dok_DataWyst AS DATE) AS DataSprzedazy,
+            SUM(CASE
+                WHEN d.dok_Typ IN (14, 6) THEN -dp.ob_IloscMag
+                ELSE dp.ob_IloscMag
+            END) AS IloscSprzedana
+        FROM
+            dok__Dokument d
+        INNER JOIN
+            dok_Pozycja dp ON d.dok_Id = dp.ob_DokMagId
+        INNER JOIN
+            tw__Towar tw ON dp.ob_TowId = tw.tw_Id
+        WHERE
+            d.dok_DataWyst >= DATEADD(day, -365, GETDATE())
+            AND d.dok_MagId IN (1, 7, 9)
+            AND d.dok_Status <> 2
+            AND d.dok_Podtyp <> 1
+        GROUP BY
+            tw.tw_Symbol, CAST(d.dok_DataWyst AS DATE)
+        ORDER BY
+            tw.tw_Symbol, DataSprzedazy
+        """
+
+        cursor_sql.execute(all_sales_query)
+        all_sales_data = cursor_sql.fetchall()
+
+        # Grupuj sprzedaże po produktach
+        sales_by_product = {}
+        for row in all_sales_data:
+            symbol = row.Symbol
+            if symbol not in sales_by_product:
+                sales_by_product[symbol] = []
+            sales_by_product[symbol].append({
+                'date': row.DataSprzedazy,
+                'quantity': row.IloscSprzedana
+            })
+
+        # Dla każdego produktu analizuj rotację
+        print(f"[Rotacja Dostaw] Analizuję rotację dla {len(product_deliveries)} produktów...")
+
+        for symbol, data in product_deliveries.items():
+            deliveries_sorted = sorted(data['deliveries'], key=lambda x: x['date'])
+            sales_data = sales_by_product.get(symbol, [])
+
+            # Symuluj stan magazynowy na podstawie dostaw i sprzedaży
+            # aby wykryć momenty zerowego stanu
+            stock_simulation = []
+            current_stock = 0
+            had_zero = False
+            last_zero_date = None
+
+            # Połącz dostawy i sprzedaż w jedną chronologiczną listę
+            events = []
+            for delivery in deliveries_sorted:
+                events.append({
+                    'date': delivery['date'].date() if hasattr(delivery['date'], 'date') else delivery['date'],
+                    'type': 'delivery',
+                    'quantity': delivery['quantity']
+                })
+
+            for sale in sales_data:
+                events.append({
+                    'date': sale['date'],
+                    'type': 'sale',
+                    'quantity': sale['quantity']
+                })
+
+            # Sortuj wszystkie wydarzenia chronologicznie
+            events.sort(key=lambda x: x['date'])
+
+            # Symuluj stan magazynowy
+            for event in events:
+                if event['type'] == 'delivery':
+                    current_stock += event['quantity']
+                else:  # sale
+                    current_stock -= event['quantity']
+
+                if current_stock <= 0:
+                    had_zero = True
+                    last_zero_date = event['date']
+                    current_stock = max(0, current_stock)  # Nie może być ujemny
+
+                stock_simulation.append({
+                    'date': event['date'],
+                    'type': event['type'],
+                    'quantity': event['quantity'],
+                    'stock_after': current_stock
+                })
+
+            data['has_zero_stock_history'] = had_zero
+            data['last_zero_date'] = last_zero_date
+            data['rotation_analysis'] = {
+                'total_deliveries': len(deliveries_sorted),
+                'total_delivered_qty': sum(d['quantity'] for d in deliveries_sorted),
+                'had_zero_stock': had_zero,
+                'stock_events': stock_simulation
+            }
+
+            # Oblicz sprzedaż po ostatniej dostawie
+            if deliveries_sorted:
+                last_delivery_date = deliveries_sorted[-1]['date']
+                comparison_date = last_delivery_date.date() if hasattr(last_delivery_date, 'date') else last_delivery_date
+                sales_after_last = sum(
+                    event['quantity']
+                    for event in stock_simulation
+                    if event['type'] == 'sale' and event['date'] > comparison_date
+                )
+                data['sales_after_last_delivery'] = sales_after_last
+            else:
+                data['sales_after_last_delivery'] = 0
+
+        cursor_sql.close()
+        connection.close()
+
+        print(f"[Rotacja Dostaw] Zakończono analizę rotacji")
+        return product_deliveries
+
+    except Exception as e:
+        print(f"[Rotacja Dostaw] Błąd: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {}
+
+
+# --- Funkcja do synchronizacji dat dodania produktów z dokumentów PZ ---
+def sync_product_dates_from_pz():
+    """
+    Pobiera pierwsze daty PZ (przyjęć zewnętrznych) dla każdego produktu
+    i aktualizuje pole DateAdded w bazie SQLite
+    """
+    try:
+        print("\n[Daty PZ] Łączenie z bazą danych SQL Server...")
+        connection = pyodbc.connect(
+            'DRIVER={ODBC Driver 18 for SQL Server};'
+            f'SERVER={os.getenv("SQL_SERVER")};'
+            f'DATABASE={os.getenv("SQL_DATABASE")};'
+            f'UID={os.getenv("SQL_USERNAME")};'
+            f'PWD={os.getenv("SQL_PASSWORD")};'
+            'TrustServerCertificate=yes;'
+            'Connection Timeout=30;'
+        )
+        cursor_sql = connection.cursor()
+
+        # Pobierz MIN(DataWystawienia) dla każdego produktu z dokumentów PZ
+        query = """
+        SELECT
+            tw.tw_Symbol AS Symbol,
+            MIN(d.dok_DataWyst) AS PierwszaDataDokumentu
+        FROM
+            dok__Dokument d
+        INNER JOIN
+            dok_Pozycja dp ON d.dok_Id = dp.ob_DokMagId
+        INNER JOIN
+            tw__Towar tw ON dp.ob_TowId = tw.tw_Id
+        WHERE
+            d.dok_Typ = 17  -- PZ (przyjęcie zewnętrzne)
+            AND d.dok_MagId IN (1, 7, 9)
+        GROUP BY
+            tw.tw_Symbol
+        """
+
+        cursor_sql.execute(query)
+        rows = cursor_sql.fetchall()
+
+        print(f"[Daty PZ] Pobrano {len(rows)} dat dokumentów dla produktów")
+
+        # Połącz z bazą SQLite
+        conn_sqlite = sqlite3.connect(DATABASE_FILE)
+        cursor_sqlite = conn_sqlite.cursor()
+
+        updated_count = 0
+        for row in rows:
+            symbol = row.Symbol
+            first_pz_date = row.PierwszaDataDokumentu
+
+            if first_pz_date:
+                # Aktualizuj DateAdded tylko jeśli jest NULL lub nowsze niż data PZ
+                cursor_sqlite.execute('''
+                    UPDATE products
+                    SET DateAdded = ?
+                    WHERE Symbol = ?
+                    AND (DateAdded IS NULL OR DateAdded > ?)
+                ''', (
+                    first_pz_date.strftime('%Y-%m-%d %H:%M:%S'),
+                    symbol,
+                    first_pz_date.strftime('%Y-%m-%d %H:%M:%S')
+                ))
+
+                if cursor_sqlite.rowcount > 0:
+                    updated_count += 1
+
+        conn_sqlite.commit()
+        conn_sqlite.close()
+
+        cursor_sql.close()
+        connection.close()
+
+        print(f"[Daty PZ] Zaktualizowano {updated_count} produktów")
+
+    except Exception as e:
+        print(f"[Daty PZ] Błąd podczas synchronizacji: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
 # --- Funkcja do pobierania statystyk ---
 def get_stats():
     conn = sqlite3.connect(DATABASE_FILE)
@@ -582,6 +994,394 @@ def get_stats():
         'changes': recent_changes
     }
 
+def compute_dead_stock_analysis():
+    """
+    Przelicza analizę dead stock i zapisuje wyniki do tabeli dead_stock_analysis.
+    Ta funkcja jest wywoływana cyklicznie aby pre-compute wyniki i przyspieszyć API.
+
+    ULEPSZONA WERSJA: Analizuje rotację na podstawie WSZYSTKICH dostaw (PZ),
+    nie tylko pierwszej daty dostawy.
+    """
+    print("\n[Dead Stock Analysis] Rozpoczynam przeliczanie analizy...")
+
+    # Pobierz szczegółową historię dostaw dla wszystkich produktów
+    product_deliveries = get_detailed_product_rotation()
+
+    # Połączenie z SQLite
+    conn_sqlite = sqlite3.connect(DATABASE_FILE)
+    cursor_sqlite = conn_sqlite.cursor()
+
+    # Pobierz wszystkie produkty z bazy SQLite
+    cursor_sqlite.execute("SELECT * FROM products")
+    products = cursor_sqlite.fetchall()
+    columns = [description[0] for description in cursor_sqlite.description]
+
+    # Połączenie z SQL Server dla historii sprzedaży
+    server = os.getenv('SQL_SERVER', r'10.101.101.5\INSERTGT')
+    database = os.getenv('SQL_DATABASE', 'Sporting_Leszno')
+    username = os.getenv('SQL_USERNAME', 'zestawienia2')
+    password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
+
+    try:
+        sql_connection = pyodbc.connect(
+            'DRIVER={ODBC Driver 18 for SQL Server};'
+            f'SERVER={server};'
+            f'DATABASE={database};'
+            f'UID={username};'
+            f'PWD={password};'
+            'TrustServerCertificate=yes;'
+            'Connection Timeout=30;'
+        )
+    except pyodbc.Error as conn_err:
+        print(f"[Dead Stock Analysis] Błąd połączenia z SQL Server: {conn_err}")
+        conn_sqlite.close()
+        return
+
+    sql_cursor = sql_connection.cursor()
+
+    # Zapytanie SQL do pobierania sprzedaży z ostatnich 365 dni
+    mag_id_filter = "1,2,3,7,9"
+    sales_query = f"""
+    WITH FilteredTowar AS (
+        SELECT
+            tw_Id,
+            tw_Symbol
+        FROM
+            tw__Towar
+    )
+    SELECT
+        MAX(FilteredTowar.tw_Symbol) AS Symbol,
+        SUM(CASE
+                WHEN dok_Typ IN (14, 6) THEN -ob_IloscMag
+                ELSE ob_IloscMag
+            END) AS IloscSprzedana,
+        SUM(CASE
+                WHEN dok_Typ IN (14, 6) THEN -ob_WartBrutto
+                ELSE ob_WartBrutto
+            END) AS WartoscSprzedazy,
+        MAX(dok_DataWyst) AS OstatniaSprzedaz
+    FROM
+        vwZstSprzWgKhnt
+    LEFT JOIN
+        FilteredTowar ON ob_TowId = FilteredTowar.tw_Id
+    WHERE
+        CAST(dok_DataWyst AS DATE) >= DATEADD(day, -365, CAST(GETDATE() AS DATE))
+        AND dok_MagId IN ({mag_id_filter})
+        AND dok_Podtyp <> 1
+        AND dok_Status <> 2
+    GROUP BY
+        ob_TowId
+    """
+
+    try:
+        sql_cursor.execute(sales_query)
+        sales_rows = sql_cursor.fetchall()
+    except Exception as e:
+        print(f"[Dead Stock Analysis] Błąd zapytania SQL: {e}")
+        sql_cursor.close()
+        sql_connection.close()
+        conn_sqlite.close()
+        return
+
+    # Konwertuj dane sprzedaży na słownik
+    sales_data = {}
+    for row in sales_rows:
+        symbol = row.Symbol
+        if symbol:
+            sales_data[symbol] = {
+                "IloscSprzedana": float(row.IloscSprzedana or 0),
+                "WartoscSprzedazy": float(row.WartoscSprzedazy or 0),
+                "OstatniaSprzedaz": row.OstatniaSprzedaz.strftime('%Y-%m-%d') if row.OstatniaSprzedaz else None
+            }
+
+    sql_cursor.close()
+    sql_connection.close()
+
+    # Wyczyść starą analizę
+    cursor_sqlite.execute("DELETE FROM dead_stock_analysis")
+
+    # Przeanalizuj każdy produkt
+    today = datetime.now()
+    analysis_timestamp = today.strftime('%Y-%m-%d %H:%M:%S')
+    analyzed_count = 0
+
+    for product in products:
+        product_dict = dict(zip(columns, product))
+        symbol = product_dict.get('Symbol')
+
+        # Bezpieczna konwersja stanu
+        try:
+            stan = float(product_dict.get('Stan') or 0)
+        except (ValueError, TypeError):
+            stan = 0
+
+        # Pomiń produkty z zerowym stanem
+        if stan <= 0:
+            continue
+
+        # Pobierz dane sprzedaży
+        sales_info = sales_data.get(symbol, {
+            "IloscSprzedana": 0,
+            "WartoscSprzedazy": 0,
+            "OstatniaSprzedaz": None
+        })
+
+        # Oblicz średnią dzienną sprzedaż
+        yearly_sales_qty = sales_info["IloscSprzedana"]
+        avg_daily_sales = yearly_sales_qty / 365.0 if yearly_sales_qty > 0 else 0
+
+        # Oblicz Days of No Movement
+        last_activity_date = None
+
+        if sales_info["OstatniaSprzedaz"]:
+            try:
+                last_activity_date = datetime.strptime(sales_info["OstatniaSprzedaz"], '%Y-%m-%d')
+            except (ValueError, TypeError):
+                pass
+
+        last_stan_change = product_dict.get('LastStanChange')
+        if not last_activity_date and last_stan_change:
+            try:
+                last_activity_date = datetime.strptime(last_stan_change, '%Y-%m-%dT%H:%M:%S.%f')
+            except ValueError:
+                try:
+                    last_activity_date = datetime.strptime(last_stan_change, '%Y-%m-%d %H:%M:%S')
+                except ValueError:
+                    try:
+                        last_activity_date = datetime.strptime(last_stan_change, '%Y-%m-%d')
+                    except ValueError:
+                        pass
+
+        if last_activity_date:
+            days_no_movement = (today - last_activity_date).days
+        else:
+            days_no_movement = 365
+
+        # Oblicz zamrożony kapitał
+        try:
+            price_netto = float(product_dict.get('DetalicznaNetto') or 0)
+        except (ValueError, TypeError):
+            price_netto = 0
+
+        frozen_value = stan * price_netto
+
+        # Oblicz dni zapasu
+        if avg_daily_sales > 0:
+            days_of_stock = stan / avg_daily_sales
+        else:
+            days_of_stock = 9999
+
+        # ULEPSZONA ANALIZA WIEKU PRODUKTU
+        # Zamiast tylko pierwszej dostawy, analizujemy WSZYSTKIE dostawy
+        # i obliczamy średni wiek obecnego zapasu
+
+        is_new_product = False
+        product_age_days = 9999
+        oldest_delivery_age = 9999
+        avg_delivery_age = 9999
+
+        # Pobierz dane rotacji dla tego produktu
+        delivery_data = product_deliveries.get(symbol, {})
+
+        # Wyciągnij dane rotacji
+        had_zero_stock = 0
+        last_zero_date = None
+        days_since_last_zero = None
+        total_deliveries = 0
+        sales_after_last_delivery = 0
+
+        if isinstance(delivery_data, dict):
+            # Nowy format - słownik z analizą rotacji
+            had_zero_stock = 1 if delivery_data.get('has_zero_stock_history', False) else 0
+            last_zero_date = delivery_data.get('last_zero_date')
+            sales_after_last_delivery = delivery_data.get('sales_after_last_delivery', 0)
+
+            if last_zero_date:
+                # Konwertuj datę do stringa jeśli to datetime
+                if isinstance(last_zero_date, datetime):
+                    last_zero_date_str = last_zero_date.strftime('%Y-%m-%d')
+                    days_since_last_zero = (today - last_zero_date).days
+                elif isinstance(last_zero_date, date):
+                    last_zero_date_str = last_zero_date.strftime('%Y-%m-%d')
+                    days_since_last_zero = (today - datetime.combine(last_zero_date, datetime.min.time())).days
+                else:
+                    last_zero_date_str = str(last_zero_date)
+                    try:
+                        last_zero_dt = datetime.strptime(last_zero_date_str, '%Y-%m-%d')
+                        days_since_last_zero = (today - last_zero_dt).days
+                    except (ValueError, TypeError):
+                        days_since_last_zero = None
+                last_zero_date = last_zero_date_str
+
+            # Pobierz liczbę dostaw z rotation_analysis
+            rotation = delivery_data.get('rotation_analysis', {})
+            if rotation:
+                total_deliveries = rotation.get('total_deliveries', 0)
+
+            # Wyciągnij listę dostaw do obliczeń wieku
+            deliveries = delivery_data.get('deliveries', [])
+        else:
+            # Stary format - bezpośrednio lista dostaw
+            deliveries = delivery_data if delivery_data else []
+            total_deliveries = len(deliveries)
+
+        if deliveries:
+            # Sortuj dostawy chronologicznie
+            deliveries_sorted = sorted(deliveries, key=lambda x: x['date'])
+
+            # Data najstarszej dostawy (dla produktów z jedną dostawą)
+            oldest_delivery = deliveries_sorted[0]
+            oldest_delivery_age = (today - oldest_delivery['date']).days
+
+            # Data najnowszej dostawy
+            newest_delivery = deliveries_sorted[-1]
+            newest_delivery_age = (today - newest_delivery['date']).days
+
+            # Jeśli jest tylko jedna dostawa, używamy jej wieku
+            if len(deliveries_sorted) == 1:
+                product_age_days = oldest_delivery_age
+            else:
+                # Jeśli jest więcej dostaw, oblicz średnią ważoną wiekiem
+                # (nowe dostawy mogą "odmłodzić" produkt)
+                total_qty = sum(d['quantity'] for d in deliveries_sorted)
+                if total_qty > 0:
+                    weighted_age = sum(
+                        ((today - d['date']).days * d['quantity'])
+                        for d in deliveries_sorted
+                    ) / total_qty
+                    avg_delivery_age = int(weighted_age)
+
+                # Używamy średniego wieku jeśli dostępny, w przeciwnym razie najstarszą dostawę
+                product_age_days = avg_delivery_age if avg_delivery_age < 9999 else oldest_delivery_age
+
+        # Jeśli brak dostaw w bazie, użyj DateAdded z SQLite jako fallback
+        if product_age_days >= 9999:
+            date_added = product_dict.get('DateAdded')
+            if date_added:
+                try:
+                    added_date = datetime.strptime(date_added, '%Y-%m-%dT%H:%M:%S.%f')
+                    product_age_days = (today - added_date).days
+                except (ValueError, TypeError):
+                    try:
+                        added_date = datetime.strptime(date_added, '%Y-%m-%d %H:%M:%S.%f')
+                        product_age_days = (today - added_date).days
+                    except (ValueError, TypeError):
+                        try:
+                            added_date = datetime.strptime(date_added, '%Y-%m-%d %H:%M:%S')
+                            product_age_days = (today - added_date).days
+                        except (ValueError, TypeError):
+                            try:
+                                added_date = datetime.strptime(date_added, '%Y-%m-%d')
+                                product_age_days = (today - added_date).days
+                            except (ValueError, TypeError):
+                                pass
+
+        if product_age_days < 30:
+            is_new_product = True
+
+        # ULEPSZONA KATEGORYZACJA z uwzględnieniem wieku produktu i historii rotacji
+
+        # SPECJALNA KATEGORIA: Produkty kupowane ponownie bez sprzedaży
+        # (miały zerowy stan, kupiliśmy ponownie, ale nie sprzedają się po nowej dostawie)
+        if (had_zero_stock and
+            total_deliveries >= 2 and
+            sales_after_last_delivery == 0 and
+            product_age_days > 30):  # Daj produkt 30 dni na wdrożenie
+
+            days_since_zero = days_since_last_zero if days_since_last_zero else 0
+            category_label = "REPEATED_NO_SALES"
+            recommendation = f"BŁĄD POWTÓRNEGO ZAKUPU ({total_deliveries} dost., 0 sprzedaży po ostatniej, {days_since_zero}d od zera) - Nie zamawiaj ponownie!"
+
+        # Produkty bardzo nowe (0-30 dni) - okres wdrożenia
+        elif is_new_product:
+            category_label = "NEW"
+            recommendation = "NOWY - Monitoruj przez 30 dni"
+
+        # Produkty 1-3 miesięczne (30-90 dni) - okres testowy
+        elif product_age_days <= 90:
+            # Informacja o liczbie dostaw dla kontekstu
+            delivery_info = f" ({total_deliveries} dost.)" if total_deliveries > 1 else ""
+
+            # Dla stosunkowo nowych produktów (30-90 dni) sprawdź czy w ogóle się sprzedają
+            if yearly_sales_qty == 0:
+                category_label = "NEW_NO_SALES"
+                recommendation = f"NOWY BEZ SPRZEDAŻY ({product_age_days}d{delivery_info}) - Pilna akcja marketingowa!"
+            elif days_of_stock <= 90:
+                category_label = "NEW_SELLING"
+                recommendation = f"NOWY, SPRZEDAJE SIĘ ({product_age_days}d{delivery_info}) - Dobrze, kontynuuj"
+            else:
+                category_label = "NEW_SLOW"
+                recommendation = f"NOWY, WOLNA SPRZEDAŻ ({product_age_days}d{delivery_info}) - Rozważ promocję"
+
+        # Produkty powyżej 3 miesięcy - normalna klasyfikacja według rotacji
+        elif days_of_stock <= 30:
+            category_label = "VERY_FAST"
+            recommendation = "BARDZO SZYBKA ROTACJA - Zwiększ zamówienia"
+        elif days_of_stock <= 90:
+            category_label = "FAST"
+            recommendation = "SZYBKA ROTACJA - Utrzymuj obecne poziomy"
+        elif days_of_stock <= 180:
+            category_label = "NORMAL"
+            recommendation = "NORMALNA ROTACJA - OK"
+        elif days_of_stock <= 365:
+            category_label = "SLOW"
+            recommendation = "WOLNA ROTACJA - Rozważ promocję"
+        elif days_of_stock < 9999:
+            category_label = "VERY_SLOW"
+            recommendation = "BARDZO WOLNA ROTACJA - Obniż ceny"
+        else:
+            category_label = "DEAD"
+            # Dla martwego zapasu pokaż wiek najstarszej dostawy
+            age_info = f"({oldest_delivery_age}d najst. dost.)" if oldest_delivery_age < 9999 else f"({product_age_days}d)"
+            delivery_info = f", {total_deliveries} dost." if total_deliveries > 1 else ""
+            recommendation = f"MARTWY ZAPAS {age_info}{delivery_info} - Wymaga natychmiastowej akcji"
+
+        # Zapisz do tabeli
+        cursor_sqlite.execute("""
+            INSERT INTO dead_stock_analysis (
+                Symbol, Nazwa, Marka, Rodzaj, Stan, DetalicznaNetto, DetalicznaBrutto,
+                LastStanChange, DaysNoMovement, FrozenValue, SprzedazRoczna,
+                SredniaDziennaSprzedaz, DniZapasu, OstatniaSprzedaz, Category,
+                Recommendation, Rozmiar, Kolor, Sezon, ProductAge, LastAnalysisUpdate, DateAdded,
+                HadZeroStock, LastZeroDate, DaysSinceLastZero, TotalDeliveries, SalesAfterLastDelivery
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            symbol,
+            product_dict.get('Nazwa'),
+            product_dict.get('Marka'),
+            product_dict.get('Rodzaj'),
+            stan,
+            price_netto,
+            float(product_dict.get('DetalicznaBrutto') or 0),
+            last_stan_change,
+            days_no_movement,
+            frozen_value,
+            yearly_sales_qty,
+            avg_daily_sales,
+            days_of_stock if days_of_stock < 9999 else None,
+            sales_info["OstatniaSprzedaz"],
+            category_label,
+            recommendation,
+            product_dict.get('Rozmiar'),
+            product_dict.get('Kolor'),
+            product_dict.get('Sezon'),
+            product_age_days if product_age_days < 9999 else None,
+            analysis_timestamp,
+            date_added,  # Data pierwszej dostawy (PZ)
+            had_zero_stock,
+            last_zero_date,
+            days_since_last_zero,
+            total_deliveries,
+            sales_after_last_delivery
+        ))
+        analyzed_count += 1
+
+    conn_sqlite.commit()
+    conn_sqlite.close()
+
+    print(f"[Dead Stock Analysis] Przeanalizowano {analyzed_count} produktów")
+    print(f"[Dead Stock Analysis] Zakończono o {analysis_timestamp}")
+
 # Główna funkcja wykonawcza
 def execute_script():
     print(f"\n{'='*60}")
@@ -593,6 +1393,8 @@ def execute_script():
     csv_url = 'https://176.32.163.90/ealpinepro2/dane/sporting/stan.csv'
     add_csv_data_to_sqlite(csv_url)
     sync_sales_history()
+    sync_product_dates_from_pz()  # Synchronizuj daty dodania z dokumentów PZ
+    compute_dead_stock_analysis()  # Przelicz analizę dead stock
 
     # Statystyki
     stats = get_stats()

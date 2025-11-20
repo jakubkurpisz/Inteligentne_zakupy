@@ -43,15 +43,31 @@ function DashboardTable() {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
       const data = await response.json();
-      setSalesPlans(data);
+      if (data.success && data.plan) {
+        // Mapowanie nazw z API do nazw magazynów
+        setSalesPlans({
+          'GLS': data.plan.gls || 0,
+          '4F': data.plan.four_f || 0,
+          'JEANS': data.plan.jeans || 0,
+          'total': data.plan.total || 0
+        });
+      } else {
+        // Fallback do domyślnych wartości
+        setSalesPlans({
+          'GLS': 15600,
+          '4F': 11571,
+          'JEANS': 7700,
+          'total': 34871
+        });
+      }
     } catch (error) {
       console.error("Błąd podczas pobierania planów sprzedażowych:", error);
-      // Użyj domyślnych wartości jeśli API nie odpowiada
+      // Fallback do domyślnych wartości
       setSalesPlans({
-        GLS: 0,
-        '4F': 0,
-        JEANS: 0,
-        total: 0
+        'GLS': 15600,
+        '4F': 11571,
+        'JEANS': 7700,
+        'total': 34871
       });
     }
   };
@@ -109,8 +125,8 @@ function DashboardTable() {
   const totalWarehouseItems = stats.warehouse_stats?.reduce((sum, w) => sum + w.ilosc_sprzedana, 0) || 0;
   const totalUPT = totalWarehouseTransactions > 0 ? totalWarehouseItems / totalWarehouseTransactions : 0;
 
-  // Pobierz plan na dziś z API
-  const totalPlan = salesPlans?.total || 0;
+  // Pobierz plan z API, z fallbackiem do hardcoded wartości
+  const totalPlan = salesPlans?.total || 33359;
 
   return (
     <div className="space-y-4">
@@ -184,14 +200,8 @@ function DashboardTable() {
 
             {/* Magazyny */}
             {stats.warehouse_stats && stats.warehouse_stats.map((warehouse, index) => {
-              // Przykładowe plany - w rzeczywistości powinny pochodzić z bazy
-              const plans = {
-                'GLS': 15600,
-                'GLS DEPOZYT': 0,
-                'JEANS': 11159,
-                'INNE': 6600
-              };
-              const plan = plans[warehouse.nazwa] || 0;
+              // Pobierz plan z API, z fallbackiem do hardcoded wartości
+              const plan = salesPlans?.[warehouse.nazwa] || 0;
               const diff = warehouse.sprzedaz - plan;
               const diffPercent = plan > 0 ? (diff / plan) * 100 : 0;
 
@@ -262,13 +272,13 @@ function DashboardTable() {
             {/* CAŁA FIRMA */}
             <tr className="border-b border-gray-200 bg-blue-50 font-bold">
               <td className="py-3 px-4 border-r border-gray-300">CAŁA FIRMA</td>
-              <td className="py-3 px-4 text-right border-r border-gray-300">{formatNumber(33359)}</td>
+              <td className="py-3 px-4 text-right border-r border-gray-300">{formatNumber(totalPlan)}</td>
               <td className="py-3 px-4 text-right border-r border-gray-300">{formatNumber(totalWarehouseSales)}</td>
               <td className="py-3 px-4 text-right border-r border-gray-300">
                 {formatNumber((stats.sales_today / stats.sales_yesterday - 1) * 100, 2)}%
               </td>
               <td className="py-3 px-4 text-right border-r border-gray-300 text-red-600">
-                {formatNumber(((totalWarehouseSales - 33359) / 33359) * 100, 2)}%
+                {formatNumber(((totalWarehouseSales - totalPlan) / totalPlan) * 100, 2)}%
               </td>
               <td className="py-3 px-4 text-right border-r border-gray-300 bg-cyan-100">
                 {formatNumber(totalWarehouseSales)}
@@ -280,12 +290,8 @@ function DashboardTable() {
 
             {/* Magazyny */}
             {stats.warehouse_stats && stats.warehouse_stats.map((warehouse, index) => {
-              const plans = {
-                'GLS': 15600,
-                'JEANS': 11159,
-                'INNE': 6600
-              };
-              const plan = plans[warehouse.nazwa] || 0;
+              // Pobierz plan z API, z fallbackiem do hardcoded wartości
+              const plan = salesPlans?.[warehouse.nazwa] || 0;
 
               return (
                 <tr key={index} className="border-b border-gray-200 hover:bg-gray-50">

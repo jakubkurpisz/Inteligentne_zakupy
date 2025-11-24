@@ -294,22 +294,22 @@ function PurchaseProposals() {
       {/* Tabela propozycji */}
       <div className="card overflow-hidden">
         <h2 className="text-lg font-semibold text-gray-900 mb-4 px-6 pt-6">Lista produktów</h2>
-        <div className="overflow-x-auto">
-          <table className="w-full">
+        <div className="overflow-x-auto" style={{ maxWidth: '100%' }}>
+          <table className="w-full text-xs" style={{ tableLayout: 'fixed', minWidth: '900px' }}>
             <thead className="bg-gray-100">
               <tr>
-                <th className="py-3 px-4 text-left font-bold text-sm border-r border-gray-300">Status</th>
-                <th className="py-3 px-4 text-left font-bold text-sm border-r border-gray-300">Symbol</th>
-                <th className="py-3 px-4 text-left font-bold text-sm border-r border-gray-300">Nazwa</th>
-                <th className="py-3 px-4 text-left font-bold text-sm border-r border-gray-300">Marka</th>
-                <th className="py-3 px-4 text-right font-bold text-sm border-r border-gray-300">Stan</th>
-                <th className="py-3 px-4 text-right font-bold text-sm border-r border-gray-300">Śr. dzienne</th>
-                <th className="py-3 px-4 text-right font-bold text-sm border-r border-gray-300">Okres (dni)</th>
-                <th className="py-3 px-4 text-right font-bold text-sm border-r border-gray-300">Stan min.</th>
-                <th className="py-3 px-4 text-right font-bold text-sm border-r border-gray-300">Różnica</th>
-                <th className="py-3 px-4 text-right font-bold text-sm border-r border-gray-300">Do zamówienia</th>
-                <th className="py-3 px-4 text-right font-bold text-sm border-r border-gray-300">Wartość</th>
-                <th className="py-3 px-4 text-center font-bold text-sm">Akcje</th>
+                <th className="py-2 px-2 text-left font-bold border-r border-gray-300" style={{ width: '70px' }}>Status</th>
+                <th className="py-2 px-2 text-left font-bold border-r border-gray-300" style={{ width: '100px' }}>Symbol</th>
+                <th className="py-2 px-2 text-left font-bold border-r border-gray-300" style={{ width: '180px' }}>Nazwa</th>
+                <th className="py-2 px-2 text-left font-bold border-r border-gray-300" style={{ width: '50px' }}>Marka</th>
+                <th className="py-2 px-2 text-right font-bold border-r border-gray-300" style={{ width: '55px' }}>Stan</th>
+                <th className="py-2 px-2 text-right font-bold border-r border-gray-300" style={{ width: '55px' }}>Śr.dz.</th>
+                <th className="py-2 px-2 text-right font-bold border-r border-gray-300" style={{ width: '50px' }}>Okres</th>
+                <th className="py-2 px-2 text-right font-bold border-r border-gray-300" style={{ width: '55px' }}>Min.</th>
+                <th className="py-2 px-2 text-right font-bold border-r border-gray-300" style={{ width: '55px' }}>Różn.</th>
+                <th className="py-2 px-2 text-right font-bold border-r border-gray-300" style={{ width: '60px' }}>Zamów</th>
+                <th className="py-2 px-2 text-right font-bold border-r border-gray-300" style={{ width: '70px' }}>Wartość</th>
+                <th className="py-2 px-2 text-center font-bold" style={{ width: '50px' }}>Akcje</th>
               </tr>
             </thead>
             <tbody>
@@ -324,102 +324,56 @@ function PurchaseProposals() {
 
                 return (
                   <tr key={index} className={`border-b border-gray-200 hover:bg-gray-50 ${rowBg}`}>
-                    <td className="py-3 px-4 border-r border-gray-300">
-                      <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-bold border ${statusColors[item.Status]}`}>
-                        {item.Status}
+                    <td className="py-1 px-2 border-r border-gray-300">
+                      <span className={`inline-flex items-center px-1 py-0.5 rounded text-xs font-bold border ${statusColors[item.Status]}`}>
+                        {item.Status === 'PONIŻEJ' ? '!' : item.Status === 'OK' ? '✓' : '↑'}
                       </span>
                     </td>
-                    <td className="py-3 px-4 text-sm font-mono border-r border-gray-300">{item.Symbol}</td>
-                    <td className="py-3 px-4 text-sm border-r border-gray-300">
-                      <div className="max-w-xs truncate" title={item.Nazwa}>
-                        {item.Nazwa}
-                      </div>
-                    </td>
-                    <td className="py-3 px-4 text-sm border-r border-gray-300">{item.Marka}</td>
-                    <td className="py-3 px-4 text-right text-sm font-medium border-r border-gray-300">
-                      {formatNumber(item.Stan, 0)} {item.JM}
-                    </td>
-                    <td className="py-3 px-4 text-right text-sm border-r border-gray-300">
-                      {formatNumber(item.SrednieDzienneZuzycie, 2)}
-                    </td>
-                    <td className="py-3 px-4 text-right text-sm border-r border-gray-300">
+                    <td className="py-1 px-2 font-mono border-r border-gray-300 truncate" title={item.Symbol}>{item.Symbol}</td>
+                    <td className="py-1 px-2 border-r border-gray-300 truncate" title={item.Nazwa}>{item.Nazwa}</td>
+                    <td className="py-1 px-2 border-r border-gray-300 truncate">{item.Marka}</td>
+                    <td className="py-1 px-2 text-right font-medium border-r border-gray-300">{formatNumber(item.Stan, 0)}</td>
+                    <td className="py-1 px-2 text-right border-r border-gray-300">{formatNumber(item.SrednieDzienneZuzycie, 2)}</td>
+                    <td className="py-1 px-2 text-right border-r border-gray-300">
                       {editingSymbol === item.Symbol ? (
-                        <div className="flex items-center justify-end space-x-2">
-                          <input
-                            type="number"
-                            value={customPeriod}
-                            onChange={(e) => setCustomPeriod(e.target.value)}
-                            className="w-16 px-2 py-1 text-sm border border-gray-300 rounded"
-                            min="1"
-                            max="365"
-                          />
-                        </div>
+                        <input
+                          type="number"
+                          value={customPeriod}
+                          onChange={(e) => setCustomPeriod(e.target.value)}
+                          className="w-12 px-1 py-0.5 text-xs border border-gray-300 rounded"
+                          min="1"
+                          max="365"
+                        />
                       ) : (
                         <span className={item.CustomPeriodDays ? 'font-bold text-blue-600' : ''}>
                           {item.ActualPeriodDays}
-                          {item.CustomPeriodDays && <span className="text-xs ml-1">✓</span>}
                         </span>
                       )}
                     </td>
-                    <td className="py-3 px-4 text-right text-sm font-medium border-r border-gray-300">
-                      {formatNumber(item.StanMinimalny, 0)}
-                    </td>
-                    <td className={`py-3 px-4 text-right text-sm font-bold border-r border-gray-300 ${
-                      item.Roznica < 0 ? 'text-red-600' : 'text-green-600'
-                    }`}>
+                    <td className="py-1 px-2 text-right font-medium border-r border-gray-300">{formatNumber(item.StanMinimalny, 0)}</td>
+                    <td className={`py-1 px-2 text-right font-bold border-r border-gray-300 ${item.Roznica < 0 ? 'text-red-600' : 'text-green-600'}`}>
                       {item.Roznica >= 0 ? '+' : ''}{formatNumber(item.Roznica, 0)}
                     </td>
-                    <td className="py-3 px-4 text-right text-sm font-bold border-r border-gray-300">
-                      {item.IloscDoZamowienia > 0 ? (
-                        <span className="text-red-600">{formatNumber(item.IloscDoZamowienia, 0)} {item.JM}</span>
-                      ) : (
-                        <span className="text-gray-400">-</span>
-                      )}
+                    <td className="py-1 px-2 text-right font-bold border-r border-gray-300">
+                      {item.IloscDoZamowienia > 0 ? <span className="text-red-600">{formatNumber(item.IloscDoZamowienia, 0)}</span> : '-'}
                     </td>
-                    <td className="py-3 px-4 text-right text-sm font-medium border-r border-gray-300">
-                      {item.WartoscZamowienia > 0 ? (
-                        <span className="text-red-600">{formatNumber(item.WartoscZamowienia)} zł</span>
-                      ) : (
-                        <span className="text-gray-400">-</span>
-                      )}
+                    <td className="py-1 px-2 text-right font-medium border-r border-gray-300">
+                      {item.WartoscZamowienia > 0 ? <span className="text-red-600">{formatNumber(item.WartoscZamowienia)}zł</span> : '-'}
                     </td>
-                    <td className="py-3 px-4 text-center">
+                    <td className="py-1 px-2 text-center">
                       {editingSymbol === item.Symbol ? (
-                        <div className="flex items-center justify-center space-x-2">
-                          <button
-                            onClick={() => saveCustomPeriod(item.Symbol)}
-                            className="p-1 text-green-600 hover:bg-green-50 rounded"
-                            title="Zapisz"
-                          >
-                            <Check className="w-4 h-4" />
+                        <div className="flex items-center justify-center space-x-1">
+                          <button onClick={() => saveCustomPeriod(item.Symbol)} className="p-0.5 text-green-600 hover:bg-green-50 rounded" title="Zapisz">
+                            <Check className="w-3 h-3" />
                           </button>
-                          <button
-                            onClick={cancelEditing}
-                            className="p-1 text-red-600 hover:bg-red-50 rounded"
-                            title="Anuluj"
-                          >
-                            <X className="w-4 h-4" />
+                          <button onClick={cancelEditing} className="p-0.5 text-red-600 hover:bg-red-50 rounded" title="Anuluj">
+                            <X className="w-3 h-3" />
                           </button>
                         </div>
                       ) : (
-                        <div className="flex items-center justify-center space-x-2">
-                          <button
-                            onClick={() => startEditing(item)}
-                            className="p-1 text-blue-600 hover:bg-blue-50 rounded"
-                            title="Edytuj okres"
-                          >
-                            <Edit2 className="w-4 h-4" />
-                          </button>
-                          {item.CustomPeriodDays && (
-                            <button
-                              onClick={() => deleteCustomPeriod(item.Symbol)}
-                              className="p-1 text-red-600 hover:bg-red-50 rounded"
-                              title="Usuń niestandardowy okres"
-                            >
-                              <X className="w-4 h-4" />
-                            </button>
-                          )}
-                        </div>
+                        <button onClick={() => startEditing(item)} className="p-0.5 text-blue-600 hover:bg-blue-50 rounded" title="Edytuj">
+                          <Edit2 className="w-3 h-3" />
+                        </button>
                       )}
                     </td>
                   </tr>

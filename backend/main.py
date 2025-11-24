@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 from typing import Dict, List, Optional
-import pyodbc
+import pymssql
 import os
 from dotenv import load_dotenv
 import csv
@@ -44,6 +44,124 @@ SALES_PLANS_CSV = BASE_DIR / "backend" / "sales_plans.csv"
 GOOGLE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1B05iP_oad2Be-F-wbT02kipF0UJkObenHkSRRm6PfJU/export?format=csv&gid=0"
 
 
+def parse_polish_number(value):
+    """Parsuje liczbę w polskim formacie (przecinek jako separator dziesiętny)"""
+    if not value:
+        return 0.0
+    try:
+        # Usuń cudzysłowy i zamień przecinek na kropkę
+        clean = str(value).strip().replace('"', '').replace(',', '.')
+        return float(clean) if clean else 0.0
+    except (ValueError, TypeError):
+        return 0.0
+
+def sync_sales_plans_from_google():
+    """Synchronizuje plany sprzedażowe z Google Sheets do SQLite"""
+    try:
+        print("[SYNC] Pobieranie danych z Google Sheets...")
+        response = requests.get(GOOGLE_SHEETS_URL, timeout=30, allow_redirects=True)
+        response.raise_for_status()
+
+        csv_content = response.text
+        csv_reader = csv.DictReader(StringIO(csv_content))
+
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        cursor = conn.cursor()
+
+        # Utwórz tabelę jeśli nie istnieje
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sales_plans (
+                date TEXT PRIMARY KEY,
+                gls REAL DEFAULT 0,
+                four_f REAL DEFAULT 0,
+                jeans REAL DEFAULT 0,
+                total REAL DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        rows_updated = 0
+        for row in csv_reader:
+            try:
+                # Obsługa różnych wariantów nazwy kolumny DATA/Data/data
+                date = row.get('DATA', row.get('Data', row.get('data', ''))).strip()
+                if not date:
+                    continue
+
+                gls = parse_polish_number(row.get('GLS', row.get('gls', 0)))
+                four_f = parse_polish_number(row.get('4F', row.get('four_f', 0)))
+                jeans = parse_polish_number(row.get('JEANS', row.get('jeans', 0)))
+                total = gls + four_f + jeans
+
+                cursor.execute("""
+                    INSERT INTO sales_plans (date, gls, four_f, jeans, total, updated_at)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(date) DO UPDATE SET
+                        gls = excluded.gls,
+                        four_f = excluded.four_f,
+                        jeans = excluded.jeans,
+                        total = excluded.total,
+                        updated_at = CURRENT_TIMESTAMP
+                """, (date, gls, four_f, jeans, total))
+                rows_updated += 1
+            except (ValueError, KeyError) as e:
+                print(f"[SYNC] Pomijam wiersz: {e}")
+                continue
+
+        conn.commit()
+        conn.close()
+        print(f"[SYNC] Zsynchronizowano {rows_updated} wierszy")
+        return True
+
+    except Exception as e:
+        print(f"[SYNC] Błąd synchronizacji: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def get_sales_plans_from_db(start_date=None, end_date=None):
+    """Pobiera plany sprzedażowe z bazy SQLite"""
+    try:
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        cursor = conn.cursor()
+
+        query = "SELECT date, gls, four_f, jeans, total FROM sales_plans"
+        params = []
+
+        if start_date or end_date:
+            conditions = []
+            if start_date:
+                conditions.append("date >= ?")
+                params.append(start_date)
+            if end_date:
+                conditions.append("date <= ?")
+                params.append(end_date)
+            query += " WHERE " + " AND ".join(conditions)
+
+        query += " ORDER BY date DESC"
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        conn.close()
+
+        plans = []
+        for row in rows:
+            plans.append({
+                "date": row[0],
+                "gls": float(row[1] or 0),
+                "four_f": float(row[2] or 0),
+                "jeans": float(row[3] or 0),
+                "total": float(row[4] or 0)
+            })
+
+        return plans
+
+    except Exception as e:
+        print(f"[DB] Błąd pobierania planów: {e}")
+        return []
+
+
 def get_local_ip():
     """Wykrywa lokalne IP maszyny"""
     try:
@@ -64,7 +182,7 @@ def run_python_script():
     print(f"Uruchamiam skrypt Pythona: {PYTHON_SCRIPT}")
     try:
         result = subprocess.run(
-            ["python", str(PYTHON_SCRIPT)],
+            ["python3", str(PYTHON_SCRIPT)],
             capture_output=True,
             text=True,
             timeout=300  # 5 minut timeout
@@ -597,16 +715,17 @@ async def get_dashboard_stats():
         password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
 
         try:
-            sql_connection = pyodbc.connect(
-                'DRIVER={ODBC Driver 18 for SQL Server};'
-                f'SERVER={server};'
-                f'DATABASE={database};'
-                f'UID={username};'
-                f'PWD={password};'
-                'TrustServerCertificate=yes;'
-                'Connection Timeout=30;'
+            # Wyciągnij sam IP z server (bez nazwy instancji)
+            server_ip = server.split('\\')[0]
+            sql_connection = pymssql.connect(
+                server=server_ip,
+                port=1433,
+                user=username,
+                password=password,
+                database=database,
+                login_timeout=30
             )
-        except pyodbc.Error as conn_err:
+        except pymssql.Error as conn_err:
             raise HTTPException(
                 status_code=500,
                 detail=f"Błąd połączenia z SQL Server: {str(conn_err)}"
@@ -622,23 +741,23 @@ async def get_dashboard_stats():
             COUNT(DISTINCT dok_NrPelny) as LiczbaTransakcji,
             COUNT(DISTINCT ob_TowId) as LiczbaProduktow
         FROM vwZstSprzWgKhnt
-        WHERE CAST(dok_DataWyst AS DATE) = ?
+        WHERE CAST(dok_DataWyst AS DATE) = %s
             AND dok_MagId IN (1,7,9)
             AND dok_Podtyp <> 1
             AND dok_Status <> 2
         """
-        sql_cursor.execute(query_today, today)
+        sql_cursor.execute(query_today, (today,))
         today_row = sql_cursor.fetchone()
 
-        sales_today = float(today_row.WartoscBrutto or 0)
-        transactions_today = int(today_row.LiczbaTransakcji or 0)
+        sales_today = float(today_row[0] or 0)
+        transactions_today = int(today_row[1] or 0)
 
         # Sprzedaż wczoraj
         yesterday = today - timedelta(days=1)
-        sql_cursor.execute(query_today, yesterday)
+        sql_cursor.execute(query_today, (yesterday,))
         yesterday_row = sql_cursor.fetchone()
-        sales_yesterday = float(yesterday_row.WartoscBrutto or 0)
-        transactions_yesterday = int(yesterday_row.LiczbaTransakcji or 0)
+        sales_yesterday = float(yesterday_row[0] or 0)
+        transactions_yesterday = int(yesterday_row[1] or 0)
 
         # Oblicz zmiany procentowe
         sales_change = ((sales_today - sales_yesterday) / sales_yesterday * 100) if sales_yesterday > 0 else 0
@@ -650,26 +769,26 @@ async def get_dashboard_stats():
             CAST(dok_DataWyst AS DATE) AS Data,
             SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_WartBrutto ELSE ob_WartBrutto END) AS WartoscBrutto
         FROM vwZstSprzWgKhnt
-        WHERE CAST(dok_DataWyst AS DATE) >= DATEADD(day, -7, CAST(? AS DATE))
-            AND CAST(dok_DataWyst AS DATE) <= ?
+        WHERE CAST(dok_DataWyst AS DATE) >= DATEADD(day, -7, CAST(%s AS DATE))
+            AND CAST(dok_DataWyst AS DATE) <= %s
             AND dok_MagId IN (1,7,9)
             AND dok_Podtyp <> 1
             AND dok_Status <> 2
         GROUP BY CAST(dok_DataWyst AS DATE)
         ORDER BY Data
         """
-        sql_cursor.execute(query_weekly, today, today)
+        sql_cursor.execute(query_weekly, (today, today))
         weekly_rows = sql_cursor.fetchall()
 
         # Mapowanie dni tygodnia
         day_names = ['Pon', 'Wt', 'Śr', 'Czw', 'Pt', 'Sob', 'Nd']
         weekly_sales = []
         for row in weekly_rows:
-            day_name = day_names[row.Data.weekday()]
+            day_name = day_names[row[0].weekday()]
             weekly_sales.append({
                 "name": day_name,
-                "data": row.Data.strftime('%Y-%m-%d'),
-                "sprzedaz": float(row.WartoscBrutto or 0)
+                "data": row[0].strftime('%Y-%m-%d'),
+                "sprzedaz": float(row[1] or 0)
             })
 
         # Top 5 produktów (ostatnie 30 dni)
@@ -681,23 +800,23 @@ async def get_dashboard_stats():
             SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_IloscMag ELSE ob_IloscMag END) AS IloscSprzedana
         FROM vwZstSprzWgKhnt
         LEFT JOIN tw__Towar tw ON ob_TowId = tw.tw_Id
-        WHERE CAST(dok_DataWyst AS DATE) >= DATEADD(day, -30, CAST(? AS DATE))
+        WHERE CAST(dok_DataWyst AS DATE) >= DATEADD(day, -30, CAST(%s AS DATE))
             AND dok_MagId IN (1,7,9)
             AND dok_Podtyp <> 1
             AND dok_Status <> 2
         GROUP BY ob_TowId
         ORDER BY WartoscSprzedazy DESC
         """
-        sql_cursor.execute(query_top_products, today)
+        sql_cursor.execute(query_top_products, (today,))
         top_products_rows = sql_cursor.fetchall()
 
         top_products = []
         for row in top_products_rows:
             top_products.append({
-                "symbol": row.Symbol or "N/A",
-                "nazwa": (row.Nazwa or "")[:30],  # Skróć nazwę do 30 znaków
-                "sprzedaz": float(row.WartoscSprzedazy or 0),
-                "ilosc": float(row.IloscSprzedana or 0)
+                "symbol": row[0] or "N/A",
+                "nazwa": (row[1] or "")[:30],  # Skróć nazwę do 30 znaków
+                "sprzedaz": float(row[2] or 0),
+                "ilosc": float(row[3] or 0)
             })
 
         sql_cursor.close()
@@ -712,24 +831,24 @@ async def get_dashboard_stats():
             COUNT(DISTINCT dok_NrPelny) as LiczbaTransakcji,
             COUNT(DISTINCT ob_TowId) as LiczbaProduktow
         FROM vwZstSprzWgKhnt
-        WHERE CAST(dok_DataWyst AS DATE) = ?
+        WHERE CAST(dok_DataWyst AS DATE) = %s
             AND dok_MagId IN (1,2,7,9)
             AND dok_Podtyp <> 1
             AND dok_Status <> 2
         GROUP BY dok_MagId
         """
 
-        sql_connection = pyodbc.connect(
-            'DRIVER={ODBC Driver 18 for SQL Server};'
-            f'SERVER={server};'
-            f'DATABASE={database};'
-            f'UID={username};'
-            f'PWD={password};'
-            'TrustServerCertificate=yes;'
-            'Connection Timeout=30;'
+        server_ip = server.split('\\')[0]
+        sql_connection = pymssql.connect(
+            server=server_ip,
+            port=1433,
+            user=username,
+            password=password,
+            database=database,
+            login_timeout=30
         )
         sql_cursor = sql_connection.cursor()
-        sql_cursor.execute(query_per_warehouse, today)
+        sql_cursor.execute(query_per_warehouse, (today,))
         warehouse_rows = sql_cursor.fetchall()
 
         warehouse_names = {1: 'GLS', 2: '4F', 7: 'JEANS'}
@@ -737,11 +856,11 @@ async def get_dashboard_stats():
         # Utwórz słownik z danymi sprzedaży per magazyn
         sales_by_warehouse = {}
         for row in warehouse_rows:
-            mag_id = row.dok_MagId
-            wartość = float(row.WartoscBrutto or 0)
-            ilosc = float(row.IloscSprzedana or 0)
-            transakcje = int(row.LiczbaTransakcji or 0)
-            produkty = int(row.LiczbaProduktow or 0)
+            mag_id = row[0]
+            wartość = float(row[1] or 0)
+            ilosc = float(row[2] or 0)
+            transakcje = int(row[3] or 0)
+            produkty = int(row[4] or 0)
 
             sales_by_warehouse[mag_id] = {
                 "wartość": wartość,
@@ -1295,16 +1414,17 @@ async def get_purchase_proposals(min_stock_days: int = 30):
         password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
 
         try:
-            sql_connection = pyodbc.connect(
-                'DRIVER={ODBC Driver 18 for SQL Server};'
-                f'SERVER={server};'
-                f'DATABASE={database};'
-                f'UID={username};'
-                f'PWD={password};'
-                'TrustServerCertificate=yes;'
-                'Connection Timeout=30;'
+            # Wyciągnij sam IP z server (bez nazwy instancji)
+            server_ip = server.split('\\')[0]
+            sql_connection = pymssql.connect(
+                server=server_ip,
+                port=1433,
+                user=username,
+                password=password,
+                database=database,
+                login_timeout=30
             )
-        except pyodbc.Error as conn_err:
+        except pymssql.Error as conn_err:
             raise HTTPException(
                 status_code=500,
                 detail=f"Błąd połączenia z SQL Server: {str(conn_err)}"
@@ -1349,9 +1469,9 @@ async def get_purchase_proposals(min_stock_days: int = 30):
         # Konwertuj dane sprzedaży na słownik
         sales_data = {}
         for row in sales_rows:
-            symbol = row.Symbol
+            symbol = row[0]
             if symbol:
-                sales_data[symbol] = float(row.IloscSprzedana or 0)
+                sales_data[symbol] = float(row[1] or 0)
 
         sql_cursor.close()
         sql_connection.close()

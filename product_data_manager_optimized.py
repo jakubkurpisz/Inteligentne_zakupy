@@ -1,4 +1,4 @@
-import pyodbc
+import pymssql
 from datetime import datetime, date
 from decimal import Decimal
 import time
@@ -126,6 +126,7 @@ def init_db():
             Sezon TEXT,
             ProductAge INTEGER,
             LastAnalysisUpdate TEXT,
+            DateAdded TEXT,
             FOREIGN KEY (Symbol) REFERENCES products(Symbol)
         )
     ''')
@@ -418,16 +419,16 @@ def upload_sql_data_to_sqlite():
 
     print(f"\n[SQL Server] Laczenie z baza danych...")
     try:
-        connection = pyodbc.connect(
-            'DRIVER={ODBC Driver 18 for SQL Server};'
-            f'SERVER={server};'
-            f'DATABASE={database};'
-            f'UID={username};'
-            f'PWD={password};'
-            'TrustServerCertificate=yes;'
-            'Connection Timeout=30;'
+        server_ip = server.split('\\')[0]
+        connection = pymssql.connect(
+            server=server_ip,
+            port=1433,
+            user=username,
+            password=password,
+            database=database,
+            login_timeout=30
         )
-    except pyodbc.Error as conn_err:
+    except pymssql.Error as conn_err:
         print(f"Blad polaczenia z SQL Server: {conn_err}")
         raise
 
@@ -467,33 +468,36 @@ def upload_sql_data_to_sqlite():
     conn_sqlite = sqlite3.connect(DATABASE_FILE)
     cursor_sqlite = conn_sqlite.cursor()
 
+    # Kolumny: Symbol(0), Nazwa(1), Stan(2), MagID(3), Marka(4), JM(5), Model(6), Opis(7),
+    # Rozmiar(8), DetalicznaNetto(9), DetalicznaBrutto(10), Uwagi(11), ModelSP(12), Sezon(13),
+    # Plec(14), Kolor(15), Przeznaczenie(16), Rodzaj(17), Grupa(18)
     changes_count = 0
     for row in rows:
-        netto = float(row.DetalicznaNetto) if isinstance(row.DetalicznaNetto, Decimal) else row.DetalicznaNetto
-        brutto = float(row.DetalicznaBrutto) if isinstance(row.DetalicznaBrutto, Decimal) else row.DetalicznaBrutto
+        netto = float(row[9]) if isinstance(row[9], Decimal) else row[9]
+        brutto = float(row[10]) if isinstance(row[10], Decimal) else row[10]
 
         product_data = {
-            'Nazwa': row.Nazwa,
-            'Stan': float(row.Stan),
-            'JM': row.JM,
+            'Nazwa': row[1],
+            'Stan': float(row[2]),
+            'JM': row[5],
             'DetalicznaNetto': netto,
             'DetalicznaBrutto': brutto,
             'CenaPromocyjna': None,
-            'Opis': row.Opis,
-            'Uwagi': row.Uwagi,
-            'Model': row.Model,
-            'Rozmiar': row.Rozmiar,
-            'Marka': row.Marka,
-            'ModelSP': row.ModelSP,
-            'Sezon': row.Sezon,
-            'Plec': row.Plec,
-            'Kolor': row.Kolor,
-            'Przeznaczenie': row.Przeznaczenie,
-            'Rodzaj': row.Rodzaj,
-            'Grupa': row.Grupa,
+            'Opis': row[7],
+            'Uwagi': row[11],
+            'Model': row[6],
+            'Rozmiar': row[8],
+            'Marka': row[4],
+            'ModelSP': row[12],
+            'Sezon': row[13],
+            'Plec': row[14],
+            'Kolor': row[15],
+            'Przeznaczenie': row[16],
+            'Rodzaj': row[17],
+            'Grupa': row[18],
         }
 
-        upsert_product(cursor_sqlite, row.Symbol, product_data, 'SQL')
+        upsert_product(cursor_sqlite, row[0], product_data, 'SQL')
         changes_count += 1
 
     conn_sqlite.commit()
@@ -570,16 +574,16 @@ def sync_sales_history():
     print("\n[Historia Sprzedaży] Łączenie z bazą danych SQL Server...")
 
     try:
-        connection = pyodbc.connect(
-            'DRIVER={ODBC Driver 18 for SQL Server};'
-            f'SERVER={server};'
-            f'DATABASE={database};'
-            f'UID={username};'
-            f'PWD={password};'
-            'TrustServerCertificate=yes;'
-            'Connection Timeout=30;'
+        server_ip = server.split('\\')[0]
+        connection = pymssql.connect(
+            server=server_ip,
+            port=1433,
+            user=username,
+            password=password,
+            database=database,
+            login_timeout=30
         )
-    except pyodbc.Error as conn_err:
+    except pymssql.Error as conn_err:
         print(f"[Historia Sprzedaży] Błąd połączenia: {str(conn_err)}")
         return
 
@@ -648,6 +652,7 @@ def sync_sales_history():
         now = datetime.now().isoformat()
         records_count = 0
 
+        # Kolumny: DataSprzedazy(0), MagId(1), IloscSprzedana(2), WartoscNetto(3), WartoscBrutto(4), LiczbaTransakcji(5), LiczbaProduktow(6)
         for row in rows:
             # Upsert do tabeli sales_history
             cursor_sqlite.execute('''
@@ -656,13 +661,13 @@ def sync_sales_history():
                  LiczbaTransakcji, LiczbaProduktow, LastUpdated)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
-                row.DataSprzedazy.strftime('%Y-%m-%d') if row.DataSprzedazy else None,
-                row.MagId,
-                float(row.IloscSprzedana or 0),
-                float(row.WartoscNetto or 0),
-                float(row.WartoscBrutto or 0),
-                int(row.LiczbaTransakcji or 0),
-                int(row.LiczbaProduktow or 0),
+                row[0].strftime('%Y-%m-%d') if row[0] else None,
+                row[1],
+                float(row[2] or 0),
+                float(row[3] or 0),
+                float(row[4] or 0),
+                int(row[5] or 0),
+                int(row[6] or 0),
                 now
             ))
             records_count += 1
@@ -696,24 +701,25 @@ def get_detailed_product_rotation():
     """
     try:
         print("\n[Rotacja Dostaw] Łączenie z bazą danych SQL Server...")
-        connection = pyodbc.connect(
-            'DRIVER={ODBC Driver 18 for SQL Server};'
-            f'SERVER={os.getenv("SQL_SERVER")};'
-            f'DATABASE={os.getenv("SQL_DATABASE")};'
-            f'UID={os.getenv("SQL_USERNAME")};'
-            f'PWD={os.getenv("SQL_PASSWORD")};'
-            'TrustServerCertificate=yes;'
-            'Connection Timeout=30;'
+        server = os.getenv("SQL_SERVER", "10.101.101.5\\INSERTGT")
+        server_ip = server.split('\\')[0]
+        connection = pymssql.connect(
+            server=server_ip,
+            port=1433,
+            user=os.getenv("SQL_USERNAME"),
+            password=os.getenv("SQL_PASSWORD"),
+            database=os.getenv("SQL_DATABASE"),
+            login_timeout=30
         )
         cursor_sql = connection.cursor()
 
-        # Pobierz WSZYSTKIE dostawy PZ (typ 17) z ostatnich 365 dni
+        # Pobierz pierwszą datę sprzedaży dla każdego produktu (jako proxy dla daty wprowadzenia)
         deliveries_query = """
         SELECT
             tw.tw_Symbol AS Symbol,
-            d.dok_DataWyst AS DataDostawy,
-            dp.ob_IloscMag AS Ilosc,
-            d.dok_Id AS DokumentId
+            MIN(d.dok_DataWyst) AS DataDostawy,
+            1 AS Ilosc,
+            0 AS DokumentId
         FROM
             dok__Dokument d
         INNER JOIN
@@ -721,23 +727,23 @@ def get_detailed_product_rotation():
         INNER JOIN
             tw__Towar tw ON dp.ob_TowId = tw.tw_Id
         WHERE
-            d.dok_Typ = 17  -- PZ (przyjęcie zewnętrzne)
-            AND d.dok_DataWyst >= DATEADD(day, -365, GETDATE())
+            d.dok_Typ IN (10, 11)  -- Paragon i Faktura sprzedaży
             AND d.dok_MagId IN (1, 7, 9)
             AND d.dok_Status <> 2
-        ORDER BY
-            tw.tw_Symbol, d.dok_DataWyst
+        GROUP BY
+            tw.tw_Symbol
         """
 
         cursor_sql.execute(deliveries_query)
         deliveries = cursor_sql.fetchall()
 
-        print(f"[Rotacja Dostaw] Pobrano {len(deliveries)} dostaw")
+        print(f"[Rotacja Dostaw] Pobrano {len(deliveries)} produktów z historią sprzedaży")
 
         # Grupuj dostawy po produktach
+        # Kolumny: Symbol(0), DataDostawy(1), Ilosc(2), DokumentId(3)
         product_deliveries = {}
         for row in deliveries:
-            symbol = row.Symbol
+            symbol = row[0]
             if symbol not in product_deliveries:
                 product_deliveries[symbol] = {
                     'deliveries': [],
@@ -747,9 +753,9 @@ def get_detailed_product_rotation():
                 }
 
             product_deliveries[symbol]['deliveries'].append({
-                'date': row.DataDostawy,
-                'quantity': float(row.Ilosc or 0),
-                'doc_id': row.DokumentId
+                'date': row[1],
+                'quantity': float(row[2] or 0),
+                'doc_id': row[3]
             })
 
         # Pobierz WSZYSTKIE sprzedaże jednym zapytaniem (optymalizacja!)
@@ -783,14 +789,15 @@ def get_detailed_product_rotation():
         all_sales_data = cursor_sql.fetchall()
 
         # Grupuj sprzedaże po produktach
+        # Kolumny: Symbol(0), DataSprzedazy(1), IloscSprzedana(2)
         sales_by_product = {}
         for row in all_sales_data:
-            symbol = row.Symbol
+            symbol = row[0]
             if symbol not in sales_by_product:
                 sales_by_product[symbol] = []
             sales_by_product[symbol].append({
-                'date': row.DataSprzedazy,
-                'quantity': row.IloscSprzedana
+                'date': row[1],
+                'quantity': float(row[2] or 0)
             })
 
         # Dla każdego produktu analizuj rotację
@@ -880,26 +887,27 @@ def get_detailed_product_rotation():
         return {}
 
 
-# --- Funkcja do synchronizacji dat dodania produktów z dokumentów PZ ---
+# --- Funkcja do synchronizacji dat dodania produktów z dokumentów sprzedaży ---
 def sync_product_dates_from_pz():
     """
-    Pobiera pierwsze daty PZ (przyjęć zewnętrznych) dla każdego produktu
+    Pobiera pierwsze daty sprzedaży dla każdego produktu
     i aktualizuje pole DateAdded w bazie SQLite
     """
     try:
-        print("\n[Daty PZ] Łączenie z bazą danych SQL Server...")
-        connection = pyodbc.connect(
-            'DRIVER={ODBC Driver 18 for SQL Server};'
-            f'SERVER={os.getenv("SQL_SERVER")};'
-            f'DATABASE={os.getenv("SQL_DATABASE")};'
-            f'UID={os.getenv("SQL_USERNAME")};'
-            f'PWD={os.getenv("SQL_PASSWORD")};'
-            'TrustServerCertificate=yes;'
-            'Connection Timeout=30;'
+        print("\n[Daty produktów] Łączenie z bazą danych SQL Server...")
+        server = os.getenv("SQL_SERVER", "10.101.101.5\\INSERTGT")
+        server_ip = server.split('\\')[0]
+        connection = pymssql.connect(
+            server=server_ip,
+            port=1433,
+            user=os.getenv("SQL_USERNAME"),
+            password=os.getenv("SQL_PASSWORD"),
+            database=os.getenv("SQL_DATABASE"),
+            login_timeout=30
         )
         cursor_sql = connection.cursor()
 
-        # Pobierz MIN(DataWystawienia) dla każdego produktu z dokumentów PZ
+        # Pobierz MIN(DataWystawienia) dla każdego produktu z dokumentów sprzedaży
         query = """
         SELECT
             tw.tw_Symbol AS Symbol,
@@ -911,7 +919,7 @@ def sync_product_dates_from_pz():
         INNER JOIN
             tw__Towar tw ON dp.ob_TowId = tw.tw_Id
         WHERE
-            d.dok_Typ = 17  -- PZ (przyjęcie zewnętrzne)
+            d.dok_Typ IN (10, 11)  -- Paragon i Faktura sprzedaży
             AND d.dok_MagId IN (1, 7, 9)
         GROUP BY
             tw.tw_Symbol
@@ -920,16 +928,17 @@ def sync_product_dates_from_pz():
         cursor_sql.execute(query)
         rows = cursor_sql.fetchall()
 
-        print(f"[Daty PZ] Pobrano {len(rows)} dat dokumentów dla produktów")
+        print(f"[Daty produktów] Pobrano {len(rows)} dat pierwszej sprzedaży")
 
         # Połącz z bazą SQLite
         conn_sqlite = sqlite3.connect(DATABASE_FILE)
         cursor_sqlite = conn_sqlite.cursor()
 
+        # Kolumny: Symbol(0), PierwszaDataDokumentu(1)
         updated_count = 0
         for row in rows:
-            symbol = row.Symbol
-            first_pz_date = row.PierwszaDataDokumentu
+            symbol = row[0]
+            first_pz_date = row[1]
 
             if first_pz_date:
                 # Aktualizuj DateAdded tylko jeśli jest NULL lub nowsze niż data PZ
@@ -953,10 +962,10 @@ def sync_product_dates_from_pz():
         cursor_sql.close()
         connection.close()
 
-        print(f"[Daty PZ] Zaktualizowano {updated_count} produktów")
+        print(f"[Daty produktów] Zaktualizowano {updated_count} produktów")
 
     except Exception as e:
-        print(f"[Daty PZ] Błąd podczas synchronizacji: {str(e)}")
+        print(f"[Daty produktów] Błąd podczas synchronizacji: {str(e)}")
         import traceback
         traceback.print_exc()
 
@@ -1023,16 +1032,16 @@ def compute_dead_stock_analysis():
     password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
 
     try:
-        sql_connection = pyodbc.connect(
-            'DRIVER={ODBC Driver 18 for SQL Server};'
-            f'SERVER={server};'
-            f'DATABASE={database};'
-            f'UID={username};'
-            f'PWD={password};'
-            'TrustServerCertificate=yes;'
-            'Connection Timeout=30;'
+        server_ip = server.split('\\')[0]
+        sql_connection = pymssql.connect(
+            server=server_ip,
+            port=1433,
+            user=username,
+            password=password,
+            database=database,
+            login_timeout=30
         )
-    except pyodbc.Error as conn_err:
+    except pymssql.Error as conn_err:
         print(f"[Dead Stock Analysis] Błąd połączenia z SQL Server: {conn_err}")
         conn_sqlite.close()
         return
@@ -1084,14 +1093,15 @@ def compute_dead_stock_analysis():
         return
 
     # Konwertuj dane sprzedaży na słownik
+    # Kolumny: Symbol(0), IloscSprzedana(1), WartoscSprzedazy(2), OstatniaSprzedaz(3)
     sales_data = {}
     for row in sales_rows:
-        symbol = row.Symbol
+        symbol = row[0]
         if symbol:
             sales_data[symbol] = {
-                "IloscSprzedana": float(row.IloscSprzedana or 0),
-                "WartoscSprzedazy": float(row.WartoscSprzedazy or 0),
-                "OstatniaSprzedaz": row.OstatniaSprzedaz.strftime('%Y-%m-%d') if row.OstatniaSprzedaz else None
+                "IloscSprzedana": float(row[1] or 0),
+                "WartoscSprzedazy": float(row[2] or 0),
+                "OstatniaSprzedaz": row[3].strftime('%Y-%m-%d') if row[3] else None
             }
 
     sql_cursor.close()
@@ -1189,6 +1199,7 @@ def compute_dead_stock_analysis():
         days_since_last_zero = None
         total_deliveries = 0
         sales_after_last_delivery = 0
+        date_added = product_dict.get('DateAdded')  # Inicjalizacja date_added
 
         if isinstance(delivery_data, dict):
             # Nowy format - słownik z analizą rotacji

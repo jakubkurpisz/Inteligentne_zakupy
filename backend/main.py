@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 from typing import Dict, List, Optional
-import pymssql
+import pyodbc
 import os
 from dotenv import load_dotenv
 import csv
@@ -16,6 +16,7 @@ from io import StringIO
 import socket
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+import math
 
 load_dotenv()
 
@@ -24,6 +25,20 @@ app = FastAPI(title="Inteligentne Zakupy API")
 # Scheduler dla cyklicznej synchronizacji
 scheduler = BackgroundScheduler()
 sync_lock = threading.Lock()  # Lock do synchronizacji aby nie uruchamiać wielu jednocześnie
+
+# Cache dla purchase-proposals
+purchase_proposals_cache = {
+    "data": None,
+    "timestamp": None,
+    "cache_duration": 600  # 10 minut w sekundach
+}
+
+# Cache dla dashboard-stats
+dashboard_stats_cache = {
+    "data": None,
+    "timestamp": None,
+    "cache_duration": 60  # 1 minuta w sekundach (częstsze odświeżanie dla dashboardu)
+}
 
 # Konfiguracja CORS
 app.add_middleware(
@@ -221,16 +236,8 @@ def schedule_sales_plans_sync():
             print(f"[AUTO-SYNC] Błąd synchronizacji planów: {e}")
 
 
-# Uruchom skrypt przy starcie i w tle co 5 minut
-@app.on_event("startup")
-async def startup_event():
-    # Uruchom harmonogram aktualizacji produktów (bez natychmiastowego uruchomienia)
-    print("[STARTUP] Harmonogram aktualizacji produktów zostanie uruchomiony za 5 minut...")
-    threading.Thread(target=schedule_python_script, daemon=True).start()
-
-    # Uruchom harmonogram synchronizacji planów (bez natychmiastowego uruchomienia)
-    print("[STARTUP] Harmonogram synchronizacji planów zostanie uruchomiony za 30 minut...")
-    threading.Thread(target=schedule_sales_plans_sync, daemon=True).start()
+# Startup event - nie uruchamiamy już niczego przy starcie
+# Harmonogram działa w tle przez APScheduler (co godzinę)
 
 
 @app.post("/api/update-database")
@@ -684,7 +691,7 @@ async def get_statistics():
 
 
 @app.get("/api/dashboard-stats")
-async def get_dashboard_stats():
+async def get_dashboard_stats(force_refresh: bool = False):
     """
     Pobiera statystyki dla dashboardu:
     - Sprzedaż dziś i wczoraj
@@ -693,8 +700,25 @@ async def get_dashboard_stats():
     - Alerty (dead stock)
     - Sprzedaż tygodniowa (ostatnie 7 dni)
     - Top 5 produktów
+
+    CACHE: Wyniki cachowane przez 1 minutę
     """
     try:
+        # Sprawdź cache
+        if not force_refresh:
+            cache_age = None
+            if dashboard_stats_cache["timestamp"]:
+                cache_age = time.time() - dashboard_stats_cache["timestamp"]
+
+            # Jeśli cache jest świeży (< 1 minuta), zwróć dane z cache
+            if cache_age is not None and cache_age < dashboard_stats_cache["cache_duration"]:
+                cached_data = dashboard_stats_cache["data"].copy()
+                cached_data["cache_info"] = {
+                    "cached": True,
+                    "cache_age_seconds": int(cache_age),
+                    "cache_expires_in": int(dashboard_stats_cache["cache_duration"] - cache_age)
+                }
+                return cached_data
         # Połączenie z SQLite dla stanów magazynowych
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -715,17 +739,16 @@ async def get_dashboard_stats():
         password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
 
         try:
-            # Wyciągnij sam IP z server (bez nazwy instancji)
-            server_ip = server.split('\\')[0]
-            sql_connection = pymssql.connect(
-                server=server_ip,
-                port=1433,
-                user=username,
-                password=password,
-                database=database,
-                login_timeout=30
+            sql_connection = pyodbc.connect(
+                'DRIVER={ODBC Driver 18 for SQL Server};'
+                f'SERVER={server};'
+                f'DATABASE={database};'
+                f'UID={username};'
+                f'PWD={password};'
+                'TrustServerCertificate=yes;'
+                'Connection Timeout=30;'
             )
-        except pymssql.Error as conn_err:
+        except pyodbc.Error as conn_err:
             raise HTTPException(
                 status_code=500,
                 detail=f"Błąd połączenia z SQL Server: {str(conn_err)}"
@@ -741,7 +764,7 @@ async def get_dashboard_stats():
             COUNT(DISTINCT dok_NrPelny) as LiczbaTransakcji,
             COUNT(DISTINCT ob_TowId) as LiczbaProduktow
         FROM vwZstSprzWgKhnt
-        WHERE CAST(dok_DataWyst AS DATE) = %s
+        WHERE CAST(dok_DataWyst AS DATE) = ?
             AND dok_MagId IN (1,7,9)
             AND dok_Podtyp <> 1
             AND dok_Status <> 2
@@ -769,8 +792,8 @@ async def get_dashboard_stats():
             CAST(dok_DataWyst AS DATE) AS Data,
             SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_WartBrutto ELSE ob_WartBrutto END) AS WartoscBrutto
         FROM vwZstSprzWgKhnt
-        WHERE CAST(dok_DataWyst AS DATE) >= DATEADD(day, -7, CAST(%s AS DATE))
-            AND CAST(dok_DataWyst AS DATE) <= %s
+        WHERE CAST(dok_DataWyst AS DATE) >= DATEADD(day, -7, CAST(? AS DATE))
+            AND CAST(dok_DataWyst AS DATE) <= ?
             AND dok_MagId IN (1,7,9)
             AND dok_Podtyp <> 1
             AND dok_Status <> 2
@@ -800,7 +823,7 @@ async def get_dashboard_stats():
             SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_IloscMag ELSE ob_IloscMag END) AS IloscSprzedana
         FROM vwZstSprzWgKhnt
         LEFT JOIN tw__Towar tw ON ob_TowId = tw.tw_Id
-        WHERE CAST(dok_DataWyst AS DATE) >= DATEADD(day, -30, CAST(%s AS DATE))
+        WHERE CAST(dok_DataWyst AS DATE) >= DATEADD(day, -30, CAST(? AS DATE))
             AND dok_MagId IN (1,7,9)
             AND dok_Podtyp <> 1
             AND dok_Status <> 2
@@ -831,21 +854,21 @@ async def get_dashboard_stats():
             COUNT(DISTINCT dok_NrPelny) as LiczbaTransakcji,
             COUNT(DISTINCT ob_TowId) as LiczbaProduktow
         FROM vwZstSprzWgKhnt
-        WHERE CAST(dok_DataWyst AS DATE) = %s
+        WHERE CAST(dok_DataWyst AS DATE) = ?
             AND dok_MagId IN (1,2,7,9)
             AND dok_Podtyp <> 1
             AND dok_Status <> 2
         GROUP BY dok_MagId
         """
 
-        server_ip = server.split('\\')[0]
-        sql_connection = pymssql.connect(
-            server=server_ip,
-            port=1433,
-            user=username,
-            password=password,
-            database=database,
-            login_timeout=30
+        sql_connection = pyodbc.connect(
+            'DRIVER={ODBC Driver 18 for SQL Server};'
+            f'SERVER={server};'
+            f'DATABASE={database};'
+            f'UID={username};'
+            f'PWD={password};'
+            'TrustServerCertificate=yes;'
+            'Connection Timeout=30;'
         )
         sql_cursor = sql_connection.cursor()
         sql_cursor.execute(query_per_warehouse, (today,))
@@ -912,7 +935,7 @@ async def get_dashboard_stats():
         conn.close()
 
         # Zwróć wszystkie statystyki
-        return {
+        result = {
             "sales_today": round(sales_today, 2),
             "sales_yesterday": round(sales_yesterday, 2),
             "sales_change": round(sales_change, 1),
@@ -925,8 +948,18 @@ async def get_dashboard_stats():
             "alerts_critical": 0,  # TODO: Oblicz z dead stock
             "weekly_sales": weekly_sales,
             "top_products": top_products,
-            "warehouse_stats": warehouse_stats
+            "warehouse_stats": warehouse_stats,
+            "cache_info": {
+                "cached": False,
+                "generated_at": datetime.now().isoformat()
+            }
         }
+
+        # Zapisz do cache
+        dashboard_stats_cache["data"] = result.copy()
+        dashboard_stats_cache["timestamp"] = time.time()
+
+        return result
 
     except Exception as e:
         raise HTTPException(
@@ -1360,13 +1393,14 @@ async def sync_sales_plans():
 
 
 @app.get("/api/purchase-proposals")
-async def get_purchase_proposals(min_stock_days: int = 30):
+async def get_purchase_proposals(min_stock_days: int = 30, force_refresh: bool = False):
     """
     Zwraca propozycje zakupowe dla suplementów.
     Oblicza stan minimalny na podstawie średniego zużycia przez ostatnie 90 dni.
 
     Parametry:
     - min_stock_days: liczba dni zapasu do obliczenia stanu minimalnego (domyślnie 30)
+    - force_refresh: wymusza odświeżenie cache (domyślnie False)
 
     Zwraca produkty z przeznaczenia "SUPLEMENTY" z informacjami:
     - Aktualny stan
@@ -1374,17 +1408,35 @@ async def get_purchase_proposals(min_stock_days: int = 30):
     - Stan minimalny (średnie zużycie * min_stock_days)
     - Różnica (stan - stan minimalny)
     - Status: PONIŻEJ / OK / NADMIAR
+
+    CACHE: Wyniki są cachowane przez 10 minut dla lepszej wydajności
     """
     try:
+        # Sprawdź cache (tylko dla min_stock_days=30 - domyślna wartość)
+        if not force_refresh and min_stock_days == 30:
+            cache_age = None
+            if purchase_proposals_cache["timestamp"]:
+                cache_age = time.time() - purchase_proposals_cache["timestamp"]
+
+            # Jeśli cache jest świeży (< 10 minut), zwróć dane z cache
+            if cache_age is not None and cache_age < purchase_proposals_cache["cache_duration"]:
+                cached_data = purchase_proposals_cache["data"].copy()
+                cached_data["cache_info"] = {
+                    "cached": True,
+                    "cache_age_seconds": int(cache_age),
+                    "cache_expires_in": int(purchase_proposals_cache["cache_duration"] - cache_age)
+                }
+                return cached_data
         # Połączenie z SQLite dla stanów magazynowych
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Pobierz produkty z przeznaczenia "SUPLEMENTY" z niestandardowymi okresami zapasu jeśli istnieją
+        # Pobierz produkty z przeznaczenia "SUPLEMENTY" z niestandardowymi parametrami jeśli istnieją
         cursor.execute("""
             SELECT p.Symbol, p.Nazwa, p.Stan, p.DetalicznaNetto, p.DetalicznaBrutto,
                    p.Marka, p.Rozmiar, p.Przeznaczenie, p.JM,
-                   c.custom_period_days, c.notes
+                   c.delivery_time_days, c.order_frequency_days, c.optimal_order_quantity, c.notes,
+                   p.CenaZakupuNetto, p.StawkaVAT
             FROM products p
             LEFT JOIN custom_stock_periods c ON p.Symbol = c.symbol
             WHERE UPPER(p.Przeznaczenie) = 'SUPLEMENTY'
@@ -1414,17 +1466,16 @@ async def get_purchase_proposals(min_stock_days: int = 30):
         password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
 
         try:
-            # Wyciągnij sam IP z server (bez nazwy instancji)
-            server_ip = server.split('\\')[0]
-            sql_connection = pymssql.connect(
-                server=server_ip,
-                port=1433,
-                user=username,
-                password=password,
-                database=database,
-                login_timeout=30
+            sql_connection = pyodbc.connect(
+                'DRIVER={ODBC Driver 18 for SQL Server};'
+                f'SERVER={server};'
+                f'DATABASE={database};'
+                f'UID={username};'
+                f'PWD={password};'
+                'TrustServerCertificate=yes;'
+                'Connection Timeout=30;'
             )
-        except pymssql.Error as conn_err:
+        except pyodbc.Error as conn_err:
             raise HTTPException(
                 status_code=500,
                 detail=f"Błąd połączenia z SQL Server: {str(conn_err)}"
@@ -1487,8 +1538,17 @@ async def get_purchase_proposals(min_stock_days: int = 30):
             product_dict = dict(product)
             symbol = product_dict.get('Symbol')
             stan = float(product_dict.get('Stan') or 0)
-            custom_period = product_dict.get('custom_period_days')
+
+            # Pobierz parametry: czas dostawy, częstotliwość zamawiania, optymalna wielkość partii
+            delivery_time = product_dict.get('delivery_time_days')
+            order_frequency = product_dict.get('order_frequency_days')
+            optimal_quantity = product_dict.get('optimal_order_quantity')
             custom_notes = product_dict.get('notes')
+
+            # Użyj domyślnych wartości jeśli nie ma niestandardowych
+            delivery_time_days = delivery_time if delivery_time is not None else 7  # Domyślnie 7 dni dostawy
+            order_frequency_days = order_frequency if order_frequency is not None else min_stock_days  # Domyślnie z parametru
+            optimal_order_quantity = optimal_quantity if optimal_quantity is not None else 0
 
             # Pobierz sprzedaż z ostatnich 90 dni
             sales_90_days = sales_data.get(symbol, 0)
@@ -1496,11 +1556,8 @@ async def get_purchase_proposals(min_stock_days: int = 30):
             # Oblicz średnie dzienne zużycie (sprzedaż / 90 dni)
             avg_daily_usage = sales_90_days / 90.0 if sales_90_days > 0 else 0
 
-            # Użyj niestandardowego okresu jeśli jest zdefiniowany, w przeciwnym razie użyj domyślnego
-            period_days = custom_period if custom_period is not None else min_stock_days
-
-            # Oblicz stan minimalny (średnie zużycie * liczba dni zapasu)
-            min_stock = avg_daily_usage * period_days
+            # NOWA LOGIKA: Stan minimalny = (Czas dostawy + Częstotliwość zamawiania) × Średnie dzienne zużycie
+            min_stock = avg_daily_usage * (delivery_time_days + order_frequency_days)
 
             # Oblicz różnicę
             difference = stan - min_stock
@@ -1520,11 +1577,34 @@ async def get_purchase_proposals(min_stock_days: int = 30):
                 products_excess += 1
 
             # Oblicz ile trzeba zamówić (jeśli poniżej minimum)
-            quantity_to_order = abs(difference) if difference < 0 else 0
+            # Zaokrąglij zawsze do góry jeśli są liczby po przecinku
+            quantity_to_order = math.ceil(abs(difference)) if difference < 0 else 0
 
-            # Oblicz wartość zamówienia
-            price_netto = float(product_dict.get('DetalicznaNetto') or 0)
-            order_value = quantity_to_order * price_netto
+            # Pobierz ceny detaliczne
+            price_detaliczna_netto = float(product_dict.get('DetalicznaNetto') or 0)
+            price_detaliczna_brutto = float(product_dict.get('DetalicznaBrutto') or 0)
+
+            # Pobierz cenę zakupu (tc_CenaMag z bazy) i VAT
+            cena_zakupu_netto = float(product_dict.get('CenaZakupuNetto') or 0)
+            stawka_vat = float(product_dict.get('StawkaVAT') or 0)
+
+            # Jeśli brak stawki VAT, oblicz ją z cen detalicznych
+            if stawka_vat == 0 and price_detaliczna_netto > 0 and price_detaliczna_brutto > 0:
+                stawka_vat = ((price_detaliczna_brutto / price_detaliczna_netto) - 1) * 100
+
+            # Oblicz cenę zakupu brutto (cena zakupu netto * (1 + VAT/100))
+            if cena_zakupu_netto > 0:
+                cena_zakupu_brutto = cena_zakupu_netto * (1 + stawka_vat / 100)
+            else:
+                # Fallback: cena magazynowa (tc_CenaMag) jest niedostępna w bazie
+                # Użyj 60% ceny detalicznej jako oszacowanie ceny zakupu
+                cena_zakupu_netto = price_detaliczna_netto * 0.6
+                if stawka_vat == 0:
+                    stawka_vat = 23.0  # Domyślna stawka VAT
+                cena_zakupu_brutto = cena_zakupu_netto * (1 + stawka_vat / 100)
+
+            # Oblicz wartość zamówienia: ilość do zamówienia × cena zakupu brutto
+            order_value = quantity_to_order * cena_zakupu_brutto
 
             if quantity_to_order > 0:
                 total_purchase_value += order_value
@@ -1539,16 +1619,21 @@ async def get_purchase_proposals(min_stock_days: int = 30):
                 "Sprzedaz90Dni": round(sales_90_days, 2),
                 "SrednieDzienneZuzycie": round(avg_daily_usage, 2),
                 "StanMinimalny": round(min_stock, 2),
-                "Roznica": round(difference, 2),
+                "Roznica": round(difference, 2) if abs(difference) >= 0.01 else 0,
                 "Status": status,
                 "StatusColor": status_color,
-                "IloscDoZamowienia": round(quantity_to_order, 2),
-                "CenaNetto": price_netto,
-                "CenaBrutto": float(product_dict.get('DetalicznaBrutto') or 0),
+                "IloscDoZamowienia": int(quantity_to_order),  # Liczba całkowita
+                "CenaZakupuNetto": round(cena_zakupu_netto, 2),
+                "CenaZakupuBrutto": round(cena_zakupu_brutto, 2),
+                "StawkaVAT": round(stawka_vat, 2),
                 "WartoscZamowienia": round(order_value, 2),
-                "CustomPeriodDays": custom_period,
-                "CustomNotes": custom_notes,
-                "ActualPeriodDays": period_days
+                "CenaDetalicznaNetto": round(price_detaliczna_netto, 2),
+                "CenaDetalicznaBrutto": round(price_detaliczna_brutto, 2),
+                # Nowe pola
+                "CzasDostawy": delivery_time_days,
+                "CzestotliwoscZamawiania": order_frequency_days,
+                "OptymalnaWielkoscPartii": optimal_order_quantity,
+                "CustomNotes": custom_notes
             })
 
         # Sortuj: najpierw poniżej minimum, potem po największej różnicy
@@ -1557,7 +1642,7 @@ async def get_purchase_proposals(min_stock_days: int = 30):
             x["Roznica"]
         ))
 
-        return {
+        result = {
             "success": True,
             "total_items": len(proposals),
             "min_stock_days": min_stock_days,
@@ -1568,8 +1653,19 @@ async def get_purchase_proposals(min_stock_days: int = 30):
                 "products_ok": products_ok,
                 "products_excess": products_excess,
                 "total_purchase_value": round(total_purchase_value, 2)
+            },
+            "cache_info": {
+                "cached": False,
+                "generated_at": datetime.now().isoformat()
             }
         }
+
+        # Zapisz do cache (tylko dla min_stock_days=30)
+        if min_stock_days == 30:
+            purchase_proposals_cache["data"] = result.copy()
+            purchase_proposals_cache["timestamp"] = time.time()
+
+        return result
 
     except HTTPException:
         raise
@@ -1581,13 +1677,21 @@ async def get_purchase_proposals(min_stock_days: int = 30):
 
 
 @app.post("/api/purchase-proposals/custom-period")
-async def save_custom_stock_period(symbol: str, custom_period_days: int, notes: str = None):
+async def save_custom_stock_period(
+    symbol: str,
+    delivery_time_days: int = 7,
+    order_frequency_days: int = 14,
+    optimal_order_quantity: int = 0,
+    notes: str = None
+):
     """
-    Zapisuje niestandardowy okres zapasu dla produktu.
+    Zapisuje niestandardowe parametry zapasu dla produktu.
 
     Parametry:
     - symbol: symbol produktu
-    - custom_period_days: liczba dni zapasu (1-365)
+    - delivery_time_days: czas dostawy w dniach (1-365)
+    - order_frequency_days: częstotliwość zamawiania w dniach (1-365)
+    - optimal_order_quantity: optymalna wielkość partii zakupowej
     - notes: opcjonalna notatka
     """
     try:
@@ -1595,8 +1699,11 @@ async def save_custom_stock_period(symbol: str, custom_period_days: int, notes: 
         if not symbol or symbol.strip() == "":
             raise HTTPException(status_code=400, detail="Symbol produktu jest wymagany")
 
-        if custom_period_days < 1 or custom_period_days > 365:
-            raise HTTPException(status_code=400, detail="Okres zapasu musi być między 1 a 365 dni")
+        if delivery_time_days < 1 or delivery_time_days > 365:
+            raise HTTPException(status_code=400, detail="Czas dostawy musi być między 1 a 365 dni")
+
+        if order_frequency_days < 1 or order_frequency_days > 365:
+            raise HTTPException(status_code=400, detail="Częstotliwość zamawiania musi być między 1 a 365 dni")
 
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -1607,25 +1714,35 @@ async def save_custom_stock_period(symbol: str, custom_period_days: int, notes: 
             conn.close()
             raise HTTPException(status_code=404, detail=f"Produkt {symbol} nie istnieje")
 
-        # Zapisz lub zaktualizuj niestandardowy okres
+        # Zapisz lub zaktualizuj niestandardowe parametry
         cursor.execute("""
-            INSERT INTO custom_stock_periods (symbol, custom_period_days, notes, updated_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO custom_stock_periods (
+                symbol, delivery_time_days, order_frequency_days, optimal_order_quantity, notes, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(symbol) DO UPDATE SET
-                custom_period_days = excluded.custom_period_days,
+                delivery_time_days = excluded.delivery_time_days,
+                order_frequency_days = excluded.order_frequency_days,
+                optimal_order_quantity = excluded.optimal_order_quantity,
                 notes = excluded.notes,
                 updated_at = CURRENT_TIMESTAMP
-        """, (symbol, custom_period_days, notes))
+        """, (symbol, delivery_time_days, order_frequency_days, optimal_order_quantity, notes))
 
         conn.commit()
         conn.close()
 
+        # Inwaliduj cache po zapisaniu
+        purchase_proposals_cache["timestamp"] = None
+        purchase_proposals_cache["data"] = None
+
         return {
             "success": True,
-            "message": f"Zapisano niestandardowy okres {custom_period_days} dni dla produktu {symbol}",
+            "message": f"Zapisano parametry dla produktu {symbol}",
             "data": {
                 "symbol": symbol,
-                "custom_period_days": custom_period_days,
+                "delivery_time_days": delivery_time_days,
+                "order_frequency_days": order_frequency_days,
+                "optimal_order_quantity": optimal_order_quantity,
                 "notes": notes
             }
         }
@@ -1653,6 +1770,10 @@ async def delete_custom_stock_period(symbol: str):
 
         conn.commit()
         conn.close()
+
+        # Inwaliduj cache po usunięciu
+        purchase_proposals_cache["timestamp"] = None
+        purchase_proposals_cache["data"] = None
 
         if rows_deleted == 0:
             return {
@@ -1726,13 +1847,7 @@ if __name__ == "__main__":
     print(f"Baza danych: {DATABASE_FILE}")
     print(f"Dokumentacja: http://localhost:{PORT}/docs")
 
-    # Uruchom synchronizację danych przy starcie serwera
-    print("\n" + "="*60)
-    print("POCZĄTKOWA SYNCHRONIZACJA DANYCH")
-    print("="*60)
-    run_data_sync()
-
-    # Skonfiguruj cykliczną synchronizację co godzinę
+    # Skonfiguruj cykliczną synchronizację co godzinę (bez początkowej synchronizacji)
     scheduler.add_job(
         run_data_sync,
         trigger=IntervalTrigger(hours=1),

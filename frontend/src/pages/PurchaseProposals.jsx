@@ -10,8 +10,12 @@ function PurchaseProposals() {
   const [minStockDays, setMinStockDays] = useState(30)
   const [searchTerm, setSearchTerm] = useState('')
   const [editingSymbol, setEditingSymbol] = useState(null)
-  const [customPeriod, setCustomPeriod] = useState('')
+  const [deliveryTime, setDeliveryTime] = useState(7)
+  const [orderFrequency, setOrderFrequency] = useState(14)
+  const [optimalQuantity, setOptimalQuantity] = useState(0)
   const [customNotes, setCustomNotes] = useState('')
+  const [sortField, setSortField] = useState('SrednieDzienneZuzycie')
+  const [sortDirection, setSortDirection] = useState('desc')
 
   useEffect(() => {
     fetchProposals()
@@ -44,13 +48,17 @@ function PurchaseProposals() {
 
   const startEditing = (item) => {
     setEditingSymbol(item.Symbol)
-    setCustomPeriod(item.CustomPeriodDays || item.ActualPeriodDays || minStockDays)
+    setDeliveryTime(item.CzasDostawy || 7)
+    setOrderFrequency(item.CzestotliwoscZamawiania || 14)
+    setOptimalQuantity(item.OptymalnaWielkoscPartii || 0)
     setCustomNotes(item.CustomNotes || '')
   }
 
   const cancelEditing = () => {
     setEditingSymbol(null)
-    setCustomPeriod('')
+    setDeliveryTime(7)
+    setOrderFrequency(14)
+    setOptimalQuantity(0)
     setCustomNotes('')
   }
 
@@ -58,7 +66,9 @@ function PurchaseProposals() {
     try {
       const params = new URLSearchParams({
         symbol: symbol,
-        custom_period_days: customPeriod,
+        delivery_time_days: deliveryTime,
+        order_frequency_days: orderFrequency,
+        optimal_order_quantity: optimalQuantity,
         notes: customNotes || ''
       })
 
@@ -67,17 +77,15 @@ function PurchaseProposals() {
       })
 
       if (!response.ok) {
-        throw new Error('Błąd podczas zapisywania niestandardowego okresu')
+        throw new Error('Błąd podczas zapisywania parametrów')
       }
 
       // Odśwież dane
       await fetchProposals()
-      setEditingSymbol(null)
-      setCustomPeriod('')
-      setCustomNotes('')
+      cancelEditing()
     } catch (error) {
       console.error('Błąd podczas zapisywania:', error)
-      alert('Błąd podczas zapisywania niestandardowego okresu')
+      alert('Błąd podczas zapisywania parametrów')
     }
   }
 
@@ -127,13 +135,95 @@ function PurchaseProposals() {
     link.click()
   }
 
-  const filteredItems = data?.items.filter(item => {
-    const matchesSearch = !searchTerm ||
-      item.Nazwa?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      item.Symbol?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      item.Marka?.toLowerCase().includes(searchTerm.toLowerCase())
-    return matchesSearch
-  }) || []
+  const handleSort = (field) => {
+    if (sortField === field) {
+      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc')
+    } else {
+      setSortField(field)
+      setSortDirection('desc')
+    }
+  }
+
+  const filteredAndSortedItems = React.useMemo(() => {
+    let items = data?.items.filter(item => {
+      const matchesSearch = !searchTerm ||
+        item.Nazwa?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        item.Symbol?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        item.Marka?.toLowerCase().includes(searchTerm.toLowerCase())
+      return matchesSearch
+    }) || []
+
+    // Sortowanie: najpierw PONIŻEJ (status), potem według wybranego pola
+    items.sort((a, b) => {
+      // Priorytet 1: Status PONIŻEJ zawsze na górze
+      if (a.Status === 'PONIŻEJ' && b.Status !== 'PONIŻEJ') return -1
+      if (a.Status !== 'PONIŻEJ' && b.Status === 'PONIŻEJ') return 1
+
+      // Priorytet 2: Sortowanie według wybranego pola
+      let aVal = a[sortField]
+      let bVal = b[sortField]
+
+      // Konwersja na liczby dla pól numerycznych
+      if (typeof aVal === 'number' || !isNaN(parseFloat(aVal))) {
+        aVal = parseFloat(aVal) || 0
+        bVal = parseFloat(bVal) || 0
+      }
+
+      if (sortDirection === 'asc') {
+        return aVal > bVal ? 1 : aVal < bVal ? -1 : 0
+      } else {
+        return aVal < bVal ? 1 : aVal > bVal ? -1 : 0
+      }
+    })
+
+    return items
+  }, [data, searchTerm, sortField, sortDirection])
+
+  // Komponent tooltipa dla nagłówków
+  const ColumnTooltip = ({ title, children, style, align = 'center' }) => {
+    const [showTooltip, setShowTooltip] = useState(false)
+    const textAlign = style?.textAlign || 'right'
+
+    // Określenie pozycji tooltipa w zależności od wyrównania
+    const getTooltipPosition = () => {
+      switch(align) {
+        case 'left':
+          return 'left-0'
+        case 'right':
+          return 'right-0'
+        default:
+          return 'left-1/2 transform -translate-x-1/2'
+      }
+    }
+
+    const getArrowPosition = () => {
+      switch(align) {
+        case 'left':
+          return 'left-8'
+        case 'right':
+          return 'right-8'
+        default:
+          return 'left-1/2 transform -translate-x-1/2'
+      }
+    }
+
+    return (
+      <th
+        className={`relative py-2 px-2 font-bold border-r border-gray-300 cursor-help group text-${textAlign}`}
+        style={style}
+        onMouseEnter={() => setShowTooltip(true)}
+        onMouseLeave={() => setShowTooltip(false)}
+      >
+        <span className="border-b-2 border-dotted border-blue-400 group-hover:border-blue-600">{title}</span>
+        {showTooltip && (
+          <div className={`absolute top-full ${getTooltipPosition()} mt-2 w-72 p-4 bg-gray-900 text-white text-sm rounded-lg shadow-2xl z-[9999] pointer-events-none whitespace-normal`}>
+            <div className={`absolute bottom-full ${getArrowPosition()} w-0 h-0 border-l-8 border-r-8 border-b-8 border-transparent border-b-gray-900`}></div>
+            {children}
+          </div>
+        )}
+      </th>
+    )
+  }
 
   if (loading) {
     return (
@@ -284,7 +374,7 @@ function PurchaseProposals() {
                 className="w-full p-2 border border-gray-300 rounded-lg"
               />
               <p className="text-xs text-gray-500 mt-1">
-                Znaleziono: {filteredItems.length} produktów
+                Znaleziono: {filteredAndSortedItems.length} produktów
               </p>
             </div>
           </div>
@@ -292,28 +382,121 @@ function PurchaseProposals() {
       </div>
 
       {/* Tabela propozycji */}
-      <div className="card overflow-hidden">
+      <div className="card">
         <h2 className="text-lg font-semibold text-gray-900 mb-4 px-6 pt-6">Lista produktów</h2>
         <div className="overflow-x-auto" style={{ maxWidth: '100%' }}>
           <table className="w-full text-xs" style={{ tableLayout: 'fixed', minWidth: '900px' }}>
             <thead className="bg-gray-100">
               <tr>
-                <th className="py-2 px-2 text-left font-bold border-r border-gray-300" style={{ width: '70px' }}>Status</th>
-                <th className="py-2 px-2 text-left font-bold border-r border-gray-300" style={{ width: '100px' }}>Symbol</th>
-                <th className="py-2 px-2 text-left font-bold border-r border-gray-300" style={{ width: '180px' }}>Nazwa</th>
-                <th className="py-2 px-2 text-left font-bold border-r border-gray-300" style={{ width: '50px' }}>Marka</th>
-                <th className="py-2 px-2 text-right font-bold border-r border-gray-300" style={{ width: '55px' }}>Stan</th>
-                <th className="py-2 px-2 text-right font-bold border-r border-gray-300" style={{ width: '55px' }}>Śr.dz.</th>
-                <th className="py-2 px-2 text-right font-bold border-r border-gray-300" style={{ width: '50px' }}>Okres</th>
-                <th className="py-2 px-2 text-right font-bold border-r border-gray-300" style={{ width: '55px' }}>Min.</th>
-                <th className="py-2 px-2 text-right font-bold border-r border-gray-300" style={{ width: '55px' }}>Różn.</th>
-                <th className="py-2 px-2 text-right font-bold border-r border-gray-300" style={{ width: '60px' }}>Zamów</th>
-                <th className="py-2 px-2 text-right font-bold border-r border-gray-300" style={{ width: '70px' }}>Wartość</th>
+                <th
+                  className="py-2 px-2 text-left font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
+                  style={{ width: '70px' }}
+                  onClick={() => handleSort('Status')}
+                  title="Kliknij aby posortować"
+                >
+                  Status {sortField === 'Status' && (sortDirection === 'asc' ? '↑' : '↓')}
+                </th>
+                <th
+                  className="py-2 px-2 text-left font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
+                  style={{ width: '100px' }}
+                  onClick={() => handleSort('Symbol')}
+                  title="Kliknij aby posortować"
+                >
+                  Symbol {sortField === 'Symbol' && (sortDirection === 'asc' ? '↑' : '↓')}
+                </th>
+                <th
+                  className="py-2 px-2 text-left font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
+                  style={{ width: '180px' }}
+                  onClick={() => handleSort('Nazwa')}
+                  title="Kliknij aby posortować"
+                >
+                  Nazwa {sortField === 'Nazwa' && (sortDirection === 'asc' ? '↑' : '↓')}
+                </th>
+                <th
+                  className="py-2 px-2 text-left font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
+                  style={{ width: '50px' }}
+                  onClick={() => handleSort('Marka')}
+                  title="Kliknij aby posortować"
+                >
+                  Marka {sortField === 'Marka' && (sortDirection === 'asc' ? '↑' : '↓')}
+                </th>
+                <th
+                  className="py-2 px-2 text-center font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
+                  style={{ width: '55px' }}
+                  onClick={() => handleSort('StanMagazynowy')}
+                  title="Stan magazynowy - kliknij aby posortować"
+                >
+                  Stan {sortField === 'StanMagazynowy' && (sortDirection === 'asc' ? '↑' : '↓')}
+                </th>
+                <th
+                  className="py-2 px-2 text-center font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
+                  style={{ width: '55px' }}
+                  onClick={() => handleSort('SrednieDzienneZuzycie')}
+                  title="Średnie dzienne zużycie - kliknij aby posortować"
+                >
+                  Śr.dz. {sortField === 'SrednieDzienneZuzycie' && (sortDirection === 'asc' ? '↑' : '↓')}
+                </th>
+                <th
+                  className="py-2 px-2 text-center font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
+                  style={{ width: '50px' }}
+                  onClick={() => handleSort('CzasDostawy')}
+                  title="Czas dostawy (dni) - kliknij aby posortować"
+                >
+                  Dost. {sortField === 'CzasDostawy' && (sortDirection === 'asc' ? '↑' : '↓')}
+                </th>
+                <th
+                  className="py-2 px-2 text-center font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
+                  style={{ width: '50px' }}
+                  onClick={() => handleSort('CzestotliwoscZamawiania')}
+                  title="Częstotliwość zamawiania (dni) - kliknij aby posortować"
+                >
+                  Częst. {sortField === 'CzestotliwoscZamawiania' && (sortDirection === 'asc' ? '↑' : '↓')}
+                </th>
+                <th
+                  className="py-2 px-2 text-center font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
+                  style={{ width: '55px' }}
+                  onClick={() => handleSort('OptymalnaWielkoscPartii')}
+                  title="Optymalna wielkość partii - kliknij aby posortować"
+                >
+                  Opt. {sortField === 'OptymalnaWielkoscPartii' && (sortDirection === 'asc' ? '↑' : '↓')}
+                </th>
+                <th
+                  className="py-2 px-2 text-center font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
+                  style={{ width: '55px' }}
+                  onClick={() => handleSort('StanMinimalny')}
+                  title="Stan minimalny - kliknij aby posortować"
+                >
+                  Min. {sortField === 'StanMinimalny' && (sortDirection === 'asc' ? '↑' : '↓')}
+                </th>
+                <th
+                  className="py-2 px-2 text-center font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
+                  style={{ width: '55px' }}
+                  onClick={() => handleSort('Roznica')}
+                  title="Różnica - kliknij aby posortować"
+                >
+                  Różn. {sortField === 'Roznica' && (sortDirection === 'asc' ? '↑' : '↓')}
+                </th>
+                <th
+                  className="py-2 px-2 text-right font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
+                  style={{ width: '60px' }}
+                  onClick={() => handleSort('IloscDoZamowienia')}
+                  title="Ilość do zamówienia - kliknij aby posortować"
+                >
+                  Zamów {sortField === 'IloscDoZamowienia' && (sortDirection === 'asc' ? '↑' : '↓')}
+                </th>
+                <th
+                  className="py-2 px-2 text-right font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
+                  style={{ width: '70px' }}
+                  onClick={() => handleSort('WartoscZamowienia')}
+                  title="Wartość zamówienia - kliknij aby posortować"
+                >
+                  Wartość {sortField === 'WartoscZamowienia' && (sortDirection === 'asc' ? '↑' : '↓')}
+                </th>
                 <th className="py-2 px-2 text-center font-bold" style={{ width: '50px' }}>Akcje</th>
               </tr>
             </thead>
             <tbody>
-              {filteredItems.map((item, index) => {
+              {filteredAndSortedItems.map((item, index) => {
                 const statusColors = {
                   'PONIŻEJ': 'bg-red-100 text-red-800 border-red-300',
                   'OK': 'bg-green-100 text-green-800 border-green-300',
@@ -338,21 +521,46 @@ function PurchaseProposals() {
                       {editingSymbol === item.Symbol ? (
                         <input
                           type="number"
-                          value={customPeriod}
-                          onChange={(e) => setCustomPeriod(e.target.value)}
+                          value={deliveryTime}
+                          onChange={(e) => setDeliveryTime(Number(e.target.value))}
                           className="w-12 px-1 py-0.5 text-xs border border-gray-300 rounded"
                           min="1"
                           max="365"
                         />
                       ) : (
-                        <span className={item.CustomPeriodDays ? 'font-bold text-blue-600' : ''}>
-                          {item.ActualPeriodDays}
-                        </span>
+                        <span>{item.CzasDostawy}</span>
+                      )}
+                    </td>
+                    <td className="py-1 px-2 text-right border-r border-gray-300">
+                      {editingSymbol === item.Symbol ? (
+                        <input
+                          type="number"
+                          value={orderFrequency}
+                          onChange={(e) => setOrderFrequency(Number(e.target.value))}
+                          className="w-12 px-1 py-0.5 text-xs border border-gray-300 rounded"
+                          min="1"
+                          max="365"
+                        />
+                      ) : (
+                        <span>{item.CzestotliwoscZamawiania}</span>
+                      )}
+                    </td>
+                    <td className="py-1 px-2 text-right border-r border-gray-300">
+                      {editingSymbol === item.Symbol ? (
+                        <input
+                          type="number"
+                          value={optimalQuantity}
+                          onChange={(e) => setOptimalQuantity(Number(e.target.value))}
+                          className="w-12 px-1 py-0.5 text-xs border border-gray-300 rounded"
+                          min="0"
+                        />
+                      ) : (
+                        <span>{item.OptymalnaWielkoscPartii || '-'}</span>
                       )}
                     </td>
                     <td className="py-1 px-2 text-right font-medium border-r border-gray-300">{formatNumber(item.StanMinimalny, 0)}</td>
-                    <td className={`py-1 px-2 text-right font-bold border-r border-gray-300 ${item.Roznica < 0 ? 'text-red-600' : 'text-green-600'}`}>
-                      {item.Roznica >= 0 ? '+' : ''}{formatNumber(item.Roznica, 0)}
+                    <td className={`py-1 px-2 text-right font-bold border-r border-gray-300 ${item.Roznica < 0 ? 'text-red-600' : item.Roznica === 0 ? 'text-gray-600' : 'text-green-600'}`}>
+                      {item.Roznica > 0 ? '+' : ''}{formatNumber(item.Roznica, 0)}
                     </td>
                     <td className="py-1 px-2 text-right font-bold border-r border-gray-300">
                       {item.IloscDoZamowienia > 0 ? <span className="text-red-600">{formatNumber(item.IloscDoZamowienia, 0)}</span> : '-'}
@@ -383,7 +591,7 @@ function PurchaseProposals() {
           </table>
         </div>
 
-        {filteredItems.length === 0 && (
+        {filteredAndSortedItems.length === 0 && (
           <div className="p-8 text-center text-gray-500">
             Brak produktów do wyświetlenia
           </div>

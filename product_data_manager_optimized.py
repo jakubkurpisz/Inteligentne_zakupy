@@ -40,6 +40,8 @@ def init_db():
             JM TEXT,
             DetalicznaNetto REAL,
             DetalicznaBrutto REAL,
+            CenaZakupuNetto REAL,
+            StawkaVAT REAL,
             CenaPromocyjna REAL,
             Opis TEXT,
             Uwagi TEXT,
@@ -231,6 +233,14 @@ def init_db():
             cursor.execute('UPDATE products SET DateAdded = LastUpdated WHERE DateAdded IS NULL')
             print("Dodano kolumnę DateAdded")
 
+        if 'CenaZakupuNetto' not in columns:
+            cursor.execute('ALTER TABLE products ADD COLUMN CenaZakupuNetto REAL')
+            print("Dodano kolumnę CenaZakupuNetto")
+
+        if 'StawkaVAT' not in columns:
+            cursor.execute('ALTER TABLE products ADD COLUMN StawkaVAT REAL')
+            print("Dodano kolumnę StawkaVAT")
+
         # Sprawdź kolumny w dead_stock_analysis
         cursor.execute("PRAGMA table_info(dead_stock_analysis)")
         dead_stock_columns = [column[1] for column in cursor.fetchall()]
@@ -303,6 +313,8 @@ def upsert_product(cursor, symbol, product_data, source='SQL'):
                 JM = ?,
                 DetalicznaNetto = ?,
                 DetalicznaBrutto = ?,
+                CenaZakupuNetto = ?,
+                StawkaVAT = ?,
                 CenaPromocyjna = ?,
                 Opis = ?,
                 Uwagi = ?,
@@ -329,6 +341,8 @@ def upsert_product(cursor, symbol, product_data, source='SQL'):
             product_data['JM'],
             product_data['DetalicznaNetto'],
             new_price,
+            product_data.get('CenaZakupuNetto'),
+            product_data.get('StawkaVAT'),
             product_data['CenaPromocyjna'],
             product_data['Opis'],
             product_data['Uwagi'],
@@ -370,11 +384,12 @@ def upsert_product(cursor, symbol, product_data, source='SQL'):
         cursor.execute('''
             INSERT INTO products (
                 Symbol, Nazwa, Stan, JM, DetalicznaNetto, DetalicznaBrutto,
+                CenaZakupuNetto, StawkaVAT,
                 CenaPromocyjna, Opis, Uwagi, Model, Rozmiar, Marka, ModelSP,
                 Sezon, Plec, Kolor, Przeznaczenie, Rodzaj, Grupa,
                 LastUpdated, LastStanChange, LastPriceChange,
                 PreviousStan, PreviousPrice, IsNew, DateAdded
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             symbol,
             product_data['Nazwa'],
@@ -382,6 +397,8 @@ def upsert_product(cursor, symbol, product_data, source='SQL'):
             product_data['JM'],
             product_data['DetalicznaNetto'],
             new_price,
+            product_data.get('CenaZakupuNetto'),
+            product_data.get('StawkaVAT'),
             product_data['CenaPromocyjna'],
             product_data['Opis'],
             product_data['Uwagi'],
@@ -445,6 +462,8 @@ def upload_sql_data_to_sqlite():
            tw_pole1 AS Rozmiar,
            tc_CenaNetto1 AS DetalicznaNetto,
            tc_CenaBrutto1 AS DetalicznaBrutto,
+           tc_CenaMag AS CenaZakupuNetto,
+           tw_StawkaVat AS StawkaVAT,
            tw_Uwagi AS Uwagi,
            tw_pole3 AS ModelSP,
            tw_pole4 AS Sezon,
@@ -459,7 +478,8 @@ def upload_sql_data_to_sqlite():
     LEFT JOIN sl__Slownik ON tw_IdGrupa = sl_Id
     WHERE st_Stan > 0 AND st_MagId IN (1, 3, 7, 9)
     GROUP BY Tw_Symbol, Tw_Nazwa, st_MagId, tw_Pole2, tw_Opis, tw_pole1, tw_pole3,
-             tw_pole6, tw_pole5, tw_pole4, tw_pole7, tw_pole8, sl_Nazwa, tc_CenaNetto1, tc_CenaBrutto1, tw_Uwagi
+             tw_pole6, tw_pole5, tw_pole4, tw_pole7, tw_pole8, sl_Nazwa, tc_CenaNetto1, tc_CenaBrutto1,
+             tc_CenaMag, tw_StawkaVat, tw_Uwagi
     """
     cursor.execute(query)
     rows = cursor.fetchall()
@@ -469,12 +489,14 @@ def upload_sql_data_to_sqlite():
     cursor_sqlite = conn_sqlite.cursor()
 
     # Kolumny: Symbol(0), Nazwa(1), Stan(2), MagID(3), Marka(4), JM(5), Model(6), Opis(7),
-    # Rozmiar(8), DetalicznaNetto(9), DetalicznaBrutto(10), Uwagi(11), ModelSP(12), Sezon(13),
-    # Plec(14), Kolor(15), Przeznaczenie(16), Rodzaj(17), Grupa(18)
+    # Rozmiar(8), DetalicznaNetto(9), DetalicznaBrutto(10), CenaZakupuNetto(11), StawkaVAT(12),
+    # Uwagi(13), ModelSP(14), Sezon(15), Plec(16), Kolor(17), Przeznaczenie(18), Rodzaj(19), Grupa(20)
     changes_count = 0
     for row in rows:
         netto = float(row[9]) if isinstance(row[9], Decimal) else row[9]
         brutto = float(row[10]) if isinstance(row[10], Decimal) else row[10]
+        cena_zakupu = float(row[11]) if isinstance(row[11], (int, float, Decimal)) and row[11] is not None else None
+        stawka_vat = float(row[12]) if isinstance(row[12], (int, float, Decimal)) and row[12] is not None else None
 
         product_data = {
             'Nazwa': row[1],
@@ -482,19 +504,21 @@ def upload_sql_data_to_sqlite():
             'JM': row[5],
             'DetalicznaNetto': netto,
             'DetalicznaBrutto': brutto,
+            'CenaZakupuNetto': cena_zakupu,
+            'StawkaVAT': stawka_vat,
             'CenaPromocyjna': None,
             'Opis': row[7],
-            'Uwagi': row[11],
+            'Uwagi': row[13],
             'Model': row[6],
             'Rozmiar': row[8],
             'Marka': row[4],
-            'ModelSP': row[12],
-            'Sezon': row[13],
-            'Plec': row[14],
-            'Kolor': row[15],
-            'Przeznaczenie': row[16],
-            'Rodzaj': row[17],
-            'Grupa': row[18],
+            'ModelSP': row[14],
+            'Sezon': row[15],
+            'Plec': row[16],
+            'Kolor': row[17],
+            'Przeznaczenie': row[18],
+            'Rodzaj': row[19],
+            'Grupa': row[20],
         }
 
         upsert_product(cursor_sqlite, row[0], product_data, 'SQL')

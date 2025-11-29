@@ -180,7 +180,7 @@ function PurchaseProposals() {
   }, [data, searchTerm, sortField, sortDirection])
 
   // Komponent tooltipa dla nagłówków
-  const ColumnTooltip = ({ title, children, style, align = 'center' }) => {
+  const ColumnTooltip = ({ title, children, style, align = 'center', onClick }) => {
     const [showTooltip, setShowTooltip] = useState(false)
     const textAlign = style?.textAlign || 'right'
 
@@ -209,10 +209,11 @@ function PurchaseProposals() {
 
     return (
       <th
-        className={`relative py-2 px-2 font-bold border-r border-gray-300 cursor-help group text-${textAlign}`}
+        className={`relative py-2 px-2 font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200 group text-${textAlign}`}
         style={style}
         onMouseEnter={() => setShowTooltip(true)}
         onMouseLeave={() => setShowTooltip(false)}
+        onClick={onClick}
       >
         <span className="border-b-2 border-dotted border-blue-400 group-hover:border-blue-600">{title}</span>
         {showTooltip && (
@@ -388,19 +389,17 @@ function PurchaseProposals() {
           <table className="w-full text-xs" style={{ tableLayout: 'fixed', minWidth: '900px' }}>
             <thead className="bg-gray-100">
               <tr>
-                <th
-                  className="py-2 px-2 text-left font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
-                  style={{ width: '70px' }}
-                  onClick={() => handleSort('Status')}
-                  title="Kliknij aby posortować"
-                >
-                  Status {sortField === 'Status' && (sortDirection === 'asc' ? '↑' : '↓')}
-                </th>
+                <ColumnTooltip title={`Status ${sortField === 'Status' ? (sortDirection === 'asc' ? '↑' : '↓') : ''}`} style={{ width: '70px', textAlign: 'left' }} align="left" onClick={() => handleSort('Status')}>
+                  <p className="font-bold text-yellow-300 mb-2">Status produktu</p>
+                  <p><span className="text-red-400 font-bold">PONIŻEJ</span> - stan poniżej minimum, trzeba zamówić</p>
+                  <p><span className="text-green-400 font-bold">OK</span> - stan w normie</p>
+                  <p><span className="text-blue-400 font-bold">NADMIAR</span> - stan powyżej optimum</p>
+                  <p className="mt-2 text-gray-400 text-xs">Kliknij nagłówek aby sortować</p>
+                </ColumnTooltip>
                 <th
                   className="py-2 px-2 text-left font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
                   style={{ width: '100px' }}
                   onClick={() => handleSort('Symbol')}
-                  title="Kliknij aby posortować"
                 >
                   Symbol {sortField === 'Symbol' && (sortDirection === 'asc' ? '↑' : '↓')}
                 </th>
@@ -408,7 +407,6 @@ function PurchaseProposals() {
                   className="py-2 px-2 text-left font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
                   style={{ width: '180px' }}
                   onClick={() => handleSort('Nazwa')}
-                  title="Kliknij aby posortować"
                 >
                   Nazwa {sortField === 'Nazwa' && (sortDirection === 'asc' ? '↑' : '↓')}
                 </th>
@@ -416,82 +414,64 @@ function PurchaseProposals() {
                   className="py-2 px-2 text-left font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
                   style={{ width: '50px' }}
                   onClick={() => handleSort('Marka')}
-                  title="Kliknij aby posortować"
                 >
                   Marka {sortField === 'Marka' && (sortDirection === 'asc' ? '↑' : '↓')}
                 </th>
-                <th
-                  className="py-2 px-2 text-center font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
-                  style={{ width: '55px' }}
-                  onClick={() => handleSort('StanMagazynowy')}
-                  title="Stan magazynowy - kliknij aby posortować"
-                >
-                  Stan {sortField === 'StanMagazynowy' && (sortDirection === 'asc' ? '↑' : '↓')}
-                </th>
-                <th
-                  className="py-2 px-2 text-center font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
-                  style={{ width: '55px' }}
-                  onClick={() => handleSort('SrednieDzienneZuzycie')}
-                  title="Średnie dzienne zużycie - kliknij aby posortować"
-                >
-                  Śr.dz. {sortField === 'SrednieDzienneZuzycie' && (sortDirection === 'asc' ? '↑' : '↓')}
-                </th>
-                <th
-                  className="py-2 px-2 text-center font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
-                  style={{ width: '50px' }}
-                  onClick={() => handleSort('CzasDostawy')}
-                  title="Czas dostawy (dni) - kliknij aby posortować"
-                >
-                  Dost. {sortField === 'CzasDostawy' && (sortDirection === 'asc' ? '↑' : '↓')}
-                </th>
-                <th
-                  className="py-2 px-2 text-center font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
-                  style={{ width: '50px' }}
-                  onClick={() => handleSort('CzestotliwoscZamawiania')}
-                  title="Częstotliwość zamawiania (dni) - kliknij aby posortować"
-                >
-                  Częst. {sortField === 'CzestotliwoscZamawiania' && (sortDirection === 'asc' ? '↑' : '↓')}
-                </th>
-                <th
-                  className="py-2 px-2 text-center font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
-                  style={{ width: '55px' }}
-                  onClick={() => handleSort('OptymalnaWielkoscPartii')}
-                  title="Optymalna wielkość partii - kliknij aby posortować"
-                >
-                  Opt. {sortField === 'OptymalnaWielkoscPartii' && (sortDirection === 'asc' ? '↑' : '↓')}
-                </th>
-                <th
-                  className="py-2 px-2 text-center font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
-                  style={{ width: '55px' }}
-                  onClick={() => handleSort('StanMinimalny')}
-                  title="Stan minimalny - kliknij aby posortować"
-                >
-                  Min. {sortField === 'StanMinimalny' && (sortDirection === 'asc' ? '↑' : '↓')}
-                </th>
-                <th
-                  className="py-2 px-2 text-center font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
-                  style={{ width: '55px' }}
-                  onClick={() => handleSort('Roznica')}
-                  title="Różnica - kliknij aby posortować"
-                >
-                  Różn. {sortField === 'Roznica' && (sortDirection === 'asc' ? '↑' : '↓')}
-                </th>
-                <th
-                  className="py-2 px-2 text-right font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
-                  style={{ width: '60px' }}
-                  onClick={() => handleSort('IloscDoZamowienia')}
-                  title="Ilość do zamówienia - kliknij aby posortować"
-                >
-                  Zamów {sortField === 'IloscDoZamowienia' && (sortDirection === 'asc' ? '↑' : '↓')}
-                </th>
-                <th
-                  className="py-2 px-2 text-right font-bold border-r border-gray-300 cursor-pointer hover:bg-gray-200"
-                  style={{ width: '70px' }}
-                  onClick={() => handleSort('WartoscZamowienia')}
-                  title="Wartość zamówienia - kliknij aby posortować"
-                >
-                  Wartość {sortField === 'WartoscZamowienia' && (sortDirection === 'asc' ? '↑' : '↓')}
-                </th>
+                <ColumnTooltip title={`Stan ${sortField === 'StanMagazynowy' ? (sortDirection === 'asc' ? '↑' : '↓') : ''}`} style={{ width: '55px', textAlign: 'center' }} onClick={() => handleSort('StanMagazynowy')}>
+                  <p className="font-bold text-yellow-300 mb-2">Stan magazynowy</p>
+                  <p>Aktualna ilość produktu na magazynie (suma magazynów 1, 7, 9).</p>
+                  <p className="mt-2 text-gray-400 text-xs">Kliknij nagłówek aby sortować</p>
+                </ColumnTooltip>
+                <ColumnTooltip title={`Śr.dz. ${sortField === 'SrednieDzienneZuzycie' ? (sortDirection === 'asc' ? '↑' : '↓') : ''}`} style={{ width: '55px', textAlign: 'center' }} onClick={() => handleSort('SrednieDzienneZuzycie')}>
+                  <p className="font-bold text-yellow-300 mb-2">Średnie dzienne zużycie</p>
+                  <p>Obliczone na podstawie sprzedaży z ostatnich <span className="text-green-400 font-bold">90 dni</span>.</p>
+                  <p className="mt-1">Wzór: <span className="font-mono bg-gray-700 px-1 rounded">Sprzedaż 90 dni / 90</span></p>
+                  <p className="mt-2 text-gray-400 text-xs">Kliknij nagłówek aby sortować</p>
+                </ColumnTooltip>
+                <ColumnTooltip title={`Dost. ${sortField === 'CzasDostawy' ? (sortDirection === 'asc' ? '↑' : '↓') : ''}`} style={{ width: '50px', textAlign: 'center' }} onClick={() => handleSort('CzasDostawy')}>
+                  <p className="font-bold text-yellow-300 mb-2">Czas dostawy (dni)</p>
+                  <p>Ile dni trwa dostawa od momentu złożenia zamówienia do dostawcy.</p>
+                  <p className="mt-1">Domyślnie: <span className="text-green-400 font-bold">7 dni</span></p>
+                  <p className="mt-2 text-blue-300">Edytowalne - kliknij ikonę edycji w kolumnie Akcje</p>
+                </ColumnTooltip>
+                <ColumnTooltip title={`Częst. ${sortField === 'CzestotliwoscZamawiania' ? (sortDirection === 'asc' ? '↑' : '↓') : ''}`} style={{ width: '50px', textAlign: 'center' }} onClick={() => handleSort('CzestotliwoscZamawiania')}>
+                  <p className="font-bold text-yellow-300 mb-2">Częstotliwość zamawiania (dni)</p>
+                  <p>Co ile dni składasz zamówienie u dostawcy.</p>
+                  <p className="mt-1">Domyślnie: <span className="text-green-400 font-bold">14 dni</span></p>
+                  <p className="mt-2 text-blue-300">Edytowalne - kliknij ikonę edycji w kolumnie Akcje</p>
+                </ColumnTooltip>
+                <ColumnTooltip title={`Opt. ${sortField === 'OptymalnaWielkoscPartii' ? (sortDirection === 'asc' ? '↑' : '↓') : ''}`} style={{ width: '55px', textAlign: 'center' }} onClick={() => handleSort('OptymalnaWielkoscPartii')}>
+                  <p className="font-bold text-yellow-300 mb-2">Optymalna wielkość partii</p>
+                  <p>Minimalna ilość do zamówienia (np. pełne kartony, palety).</p>
+                  <p className="mt-1">Wartość <span className="text-green-400 font-bold">0</span> = brak ograniczenia</p>
+                  <p className="mt-2 text-blue-300">Edytowalne - kliknij ikonę edycji w kolumnie Akcje</p>
+                </ColumnTooltip>
+                <ColumnTooltip title={`Min. ${sortField === 'StanMinimalny' ? (sortDirection === 'asc' ? '↑' : '↓') : ''}`} style={{ width: '55px', textAlign: 'center' }} onClick={() => handleSort('StanMinimalny')}>
+                  <p className="font-bold text-yellow-300 mb-2">Stan minimalny</p>
+                  <p>Poziom zapasu, poniżej którego należy złożyć zamówienie.</p>
+                  <p className="mt-1">Wzór:</p>
+                  <p className="font-mono bg-gray-700 px-1 rounded text-xs">(Czas dostawy + Częstotliwość) × Śr. dzienne zużycie</p>
+                  <p className="mt-2 text-gray-400 text-xs">Kliknij nagłówek aby sortować</p>
+                </ColumnTooltip>
+                <ColumnTooltip title={`Różn. ${sortField === 'Roznica' ? (sortDirection === 'asc' ? '↑' : '↓') : ''}`} style={{ width: '55px', textAlign: 'center' }} onClick={() => handleSort('Roznica')}>
+                  <p className="font-bold text-yellow-300 mb-2">Różnica</p>
+                  <p>Różnica między stanem magazynowym a stanem minimalnym.</p>
+                  <p className="mt-1">Wzór: <span className="font-mono bg-gray-700 px-1 rounded">Stan - Stan minimalny</span></p>
+                  <p className="mt-1"><span className="text-red-400">Ujemna</span> = trzeba zamówić</p>
+                  <p><span className="text-green-400">Dodatnia</span> = zapas wystarczający</p>
+                </ColumnTooltip>
+                <ColumnTooltip title={`Zamów ${sortField === 'IloscDoZamowienia' ? (sortDirection === 'asc' ? '↑' : '↓') : ''}`} style={{ width: '60px', textAlign: 'right' }} align="right" onClick={() => handleSort('IloscDoZamowienia')}>
+                  <p className="font-bold text-yellow-300 mb-2">Ilość do zamówienia</p>
+                  <p>Sugerowana ilość do zamówienia, aby osiągnąć stan minimalny.</p>
+                  <p className="mt-1">Zaokrąglone <span className="text-green-400 font-bold">w górę</span> do liczby całkowitej.</p>
+                  <p className="mt-2 text-gray-400 text-xs">Kliknij nagłówek aby sortować</p>
+                </ColumnTooltip>
+                <ColumnTooltip title={`Wartość ${sortField === 'WartoscZamowienia' ? (sortDirection === 'asc' ? '↑' : '↓') : ''}`} style={{ width: '70px', textAlign: 'right' }} align="right" onClick={() => handleSort('WartoscZamowienia')}>
+                  <p className="font-bold text-yellow-300 mb-2">Wartość zamówienia</p>
+                  <p>Szacunkowa wartość zamówienia w złotych.</p>
+                  <p className="mt-1">Wzór: <span className="font-mono bg-gray-700 px-1 rounded text-xs">Ilość × Cena zakupu brutto</span></p>
+                  <p className="mt-2 text-gray-400 text-xs">Kliknij nagłówek aby sortować</p>
+                </ColumnTooltip>
                 <th className="py-2 px-2 text-center font-bold" style={{ width: '50px' }}>Akcje</th>
               </tr>
             </thead>

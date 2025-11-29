@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Calendar, TrendingUp, Download, Filter, RefreshCw, Warehouse } from 'lucide-react'
+import { Calendar, TrendingUp, Download, Filter, RefreshCw, Warehouse, Package, ChevronDown, ChevronUp } from 'lucide-react'
 import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import { API_BASE_URL } from '../config/api'
 
@@ -12,6 +12,25 @@ function SalesAnalysisNew() {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [selectedMagazyny, setSelectedMagazyny] = useState(['1', '7', '9']);
+
+  // Stan dla listy towarów sprzedanych
+  const [salesItems, setSalesItems] = useState([]);
+  const [salesItemsLoading, setSalesItemsLoading] = useState(false);
+  const [salesItemsError, setSalesItemsError] = useState(null);
+  const [availableFilters, setAvailableFilters] = useState({ rodzaje: [], przeznaczenia: [], marki: [] });
+  const [selectedRodzaj, setSelectedRodzaj] = useState('');
+  const [selectedPrzeznaczenie, setSelectedPrzeznaczenie] = useState('');
+  const [selectedMarka, setSelectedMarka] = useState('');
+  const [showItemsSection, setShowItemsSection] = useState(true);
+  const [sortConfig, setSortConfig] = useState({ key: 'WartoscBrutto', direction: 'desc' });
+
+  // Stan dla wykresu trendu produktów
+  const [trendData, setTrendData] = useState([]);
+  const [trendLoading, setTrendLoading] = useState(false);
+
+  // Filtry dla wykresu trendu (symbol i model)
+  const [trendSymbol, setTrendSymbol] = useState('');
+  const [trendModel, setTrendModel] = useState('');
 
   // Mapowanie magazynów
   const magazyny = {
@@ -51,6 +70,126 @@ function SalesAnalysisNew() {
     } finally {
       setLoading(false);
     }
+  };
+
+  // Pobierz listę sprzedanych produktów z SQL Server
+  const fetchSalesItems = async () => {
+    if (!startDate || !endDate) return;
+
+    setSalesItemsLoading(true);
+    setSalesItemsError(null);
+    try {
+      const magIds = selectedMagazyny.join(',');
+      let url = `${API_URL}/api/sales-items?start_date=${startDate}&end_date=${endDate}&mag_ids=${magIds}&limit=500`;
+
+      if (selectedRodzaj) url += `&rodzaj=${encodeURIComponent(selectedRodzaj)}`;
+      if (selectedPrzeznaczenie) url += `&przeznaczenie=${encodeURIComponent(selectedPrzeznaczenie)}`;
+      if (selectedMarka) url += `&marka=${encodeURIComponent(selectedMarka)}`;
+
+      const response = await fetch(url);
+      if (!response.ok) {
+        if (response.status === 503) {
+          const errorData = await response.json();
+          throw new Error(errorData.detail || 'Serwer SQL jest niedostępny');
+        }
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const result = await response.json();
+      setSalesItems(result.items || []);
+      if (result.filters) {
+        setAvailableFilters(result.filters);
+      }
+    } catch (error) {
+      console.error("Błąd podczas pobierania listy towarów:", error);
+      setSalesItemsError(error.message);
+    } finally {
+      setSalesItemsLoading(false);
+    }
+  };
+
+  // Pobierz trend sprzedaży dla wykresu
+  const fetchTrendData = async () => {
+    if (!startDate || !endDate) return;
+
+    setTrendLoading(true);
+    try {
+      const magIds = selectedMagazyny.join(',');
+      // Wybierz grupowanie w zależności od okresu
+      let groupBy = 'day';
+      if (period === 'monthly' || period === 'yearly') groupBy = 'month';
+      else if (period === 'weekly') groupBy = 'week';
+
+      let url = `${API_URL}/api/sales-items-trend?start_date=${startDate}&end_date=${endDate}&mag_ids=${magIds}&group_by=${groupBy}`;
+
+      if (selectedRodzaj) url += `&rodzaj=${encodeURIComponent(selectedRodzaj)}`;
+      if (selectedPrzeznaczenie) url += `&przeznaczenie=${encodeURIComponent(selectedPrzeznaczenie)}`;
+      if (trendSymbol) url += `&symbol=${encodeURIComponent(trendSymbol)}`;
+      if (trendModel) url += `&model=${encodeURIComponent(trendModel)}`;
+
+      const response = await fetch(url);
+      if (response.ok) {
+        const result = await response.json();
+        setTrendData(result.data || []);
+      }
+    } catch (error) {
+      console.error("Błąd podczas pobierania trendu:", error);
+    } finally {
+      setTrendLoading(false);
+    }
+  };
+
+  // Pobierz filtry przy pierwszym załadowaniu
+  useEffect(() => {
+    const fetchFilters = async () => {
+      try {
+        const response = await fetch(`${API_URL}/api/sales-items/filters`);
+        if (response.ok) {
+          const filters = await response.json();
+          setAvailableFilters(filters);
+        }
+      } catch (error) {
+        console.error("Błąd podczas pobierania filtrów:", error);
+      }
+    };
+    fetchFilters();
+  }, [API_URL]);
+
+  // Pobierz listę produktów gdy zmienią się daty lub filtry
+  useEffect(() => {
+    if (startDate && endDate) {
+      fetchSalesItems();
+    }
+  }, [startDate, endDate, selectedMagazyny, selectedRodzaj, selectedPrzeznaczenie, selectedMarka]);
+
+  // Pobierz trend gdy zmienią się daty lub filtry trendu
+  useEffect(() => {
+    if (startDate && endDate) {
+      fetchTrendData();
+    }
+  }, [startDate, endDate, selectedMagazyny, selectedRodzaj, selectedPrzeznaczenie, trendSymbol, trendModel]);
+
+  // Sortowanie listy towarów
+  const sortedSalesItems = [...salesItems].sort((a, b) => {
+    const aVal = a[sortConfig.key] || 0;
+    const bVal = b[sortConfig.key] || 0;
+    if (sortConfig.direction === 'asc') {
+      return aVal > bVal ? 1 : -1;
+    }
+    return aVal < bVal ? 1 : -1;
+  });
+
+  const handleSort = (key) => {
+    setSortConfig(prev => ({
+      key,
+      direction: prev.key === key && prev.direction === 'desc' ? 'asc' : 'desc'
+    }));
+  };
+
+  const SortIcon = ({ columnKey }) => {
+    if (sortConfig.key !== columnKey) return null;
+    return sortConfig.direction === 'desc' ?
+      <ChevronDown className="w-4 h-4 inline ml-1" /> :
+      <ChevronUp className="w-4 h-4 inline ml-1" />;
   };
 
   const handlePeriodChange = (newPeriod) => {
@@ -479,6 +618,298 @@ function SalesAnalysisNew() {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Lista sprzedanych towarów */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center space-x-3">
+            <Package className="w-6 h-6 text-primary-600" />
+            <h2 className="text-lg font-semibold text-gray-900">Lista sprzedanych towarów</h2>
+            <span className="text-sm text-gray-500">({salesItems.length} produktów)</span>
+          </div>
+          <button
+            onClick={() => setShowItemsSection(!showItemsSection)}
+            className="btn-secondary text-sm flex items-center space-x-1"
+          >
+            {showItemsSection ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            <span>{showItemsSection ? 'Zwiń' : 'Rozwiń'}</span>
+          </button>
+        </div>
+
+        {showItemsSection && (
+          <>
+            {/* Filtry produktów */}
+            <div className="border-t border-b py-4 mb-4 bg-gray-50 -mx-6 px-6">
+              <div className="flex items-center space-x-3 mb-3">
+                <Filter className="w-5 h-5 text-gray-400" />
+                <span className="text-sm font-medium text-gray-700">Filtry produktów:</span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* Filtr Rodzaj */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Rodzaj</label>
+                  <select
+                    value={selectedRodzaj}
+                    onChange={(e) => setSelectedRodzaj(e.target.value)}
+                    className="w-full p-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500"
+                  >
+                    <option value="">Wszystkie rodzaje</option>
+                    {availableFilters.rodzaje.map(rodzaj => (
+                      <option key={rodzaj} value={rodzaj}>{rodzaj}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Filtr Przeznaczenie */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Przeznaczenie</label>
+                  <select
+                    value={selectedPrzeznaczenie}
+                    onChange={(e) => setSelectedPrzeznaczenie(e.target.value)}
+                    className="w-full p-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500"
+                  >
+                    <option value="">Wszystkie przeznaczenia</option>
+                    {availableFilters.przeznaczenia.map(prz => (
+                      <option key={prz} value={prz}>{prz}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Filtr Marka */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Marka</label>
+                  <select
+                    value={selectedMarka}
+                    onChange={(e) => setSelectedMarka(e.target.value)}
+                    className="w-full p-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500"
+                  >
+                    <option value="">Wszystkie marki</option>
+                    {availableFilters.marki.map(marka => (
+                      <option key={marka} value={marka}>{marka}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Aktywne filtry */}
+              {(selectedRodzaj || selectedPrzeznaczenie || selectedMarka) && (
+                <div className="flex items-center space-x-2 mt-3">
+                  <span className="text-sm text-gray-500">Aktywne filtry:</span>
+                  {selectedRodzaj && (
+                    <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                      Rodzaj: {selectedRodzaj}
+                      <button onClick={() => setSelectedRodzaj('')} className="ml-1 hover:text-blue-600">&times;</button>
+                    </span>
+                  )}
+                  {selectedPrzeznaczenie && (
+                    <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                      Przeznaczenie: {selectedPrzeznaczenie}
+                      <button onClick={() => setSelectedPrzeznaczenie('')} className="ml-1 hover:text-green-600">&times;</button>
+                    </span>
+                  )}
+                  {selectedMarka && (
+                    <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
+                      Marka: {selectedMarka}
+                      <button onClick={() => setSelectedMarka('')} className="ml-1 hover:text-purple-600">&times;</button>
+                    </span>
+                  )}
+                  <button
+                    onClick={() => { setSelectedRodzaj(''); setSelectedPrzeznaczenie(''); setSelectedMarka(''); }}
+                    className="text-xs text-gray-500 hover:text-gray-700 underline"
+                  >
+                    Wyczyść wszystkie
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Wykres trendu sprzedaży produktów */}
+            <div className="mb-6">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-md font-semibold text-gray-800">
+                  Trend sprzedaży {selectedRodzaj ? `(${selectedRodzaj})` : ''} {selectedPrzeznaczenie ? `- ${selectedPrzeznaczenie}` : ''} {trendSymbol ? `[${trendSymbol}]` : ''} {trendModel ? `[Model: ${trendModel}]` : ''}
+                </h3>
+                {trendLoading && <RefreshCw className="w-4 h-4 animate-spin text-primary-600" />}
+              </div>
+
+              {/* Filtry dla wykresu trendu */}
+              <div className="flex items-center space-x-4 mb-4 p-3 bg-indigo-50 rounded-lg border border-indigo-200">
+                <div className="flex items-center space-x-2">
+                  <label className="text-sm font-medium text-indigo-700">Symbol:</label>
+                  <input
+                    type="text"
+                    value={trendSymbol}
+                    onChange={(e) => setTrendSymbol(e.target.value)}
+                    placeholder="np. NIKE-123"
+                    className="p-2 border border-indigo-300 rounded-lg text-sm w-40 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                  />
+                </div>
+                <div className="flex items-center space-x-2">
+                  <label className="text-sm font-medium text-indigo-700">Model:</label>
+                  <input
+                    type="text"
+                    value={trendModel}
+                    onChange={(e) => setTrendModel(e.target.value)}
+                    placeholder="np. Air Max"
+                    className="p-2 border border-indigo-300 rounded-lg text-sm w-40 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                  />
+                </div>
+                {(trendSymbol || trendModel) && (
+                  <button
+                    onClick={() => { setTrendSymbol(''); setTrendModel(''); }}
+                    className="text-xs text-indigo-600 hover:text-indigo-800 underline"
+                  >
+                    Wyczyść filtry
+                  </button>
+                )}
+              </div>
+
+              {trendData.length > 0 ? (
+                <ResponsiveContainer width="100%" height={250}>
+                  <AreaChart data={trendData}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="Data" tick={{ fontSize: 11 }} />
+                    <YAxis yAxisId="left" />
+                    <YAxis yAxisId="right" orientation="right" />
+                    <Tooltip formatter={(value) => typeof value === 'number' ? formatNumber(value) : value} />
+                    <Legend />
+                    <Area
+                      yAxisId="left"
+                      type="monotone"
+                      dataKey="WartoscBrutto"
+                      stroke="#10b981"
+                      fill="#10b981"
+                      fillOpacity={0.3}
+                      name="Wartość brutto (zł)"
+                    />
+                    <Area
+                      yAxisId="right"
+                      type="monotone"
+                      dataKey="IloscSprzedana"
+                      stroke="#6366f1"
+                      fill="#6366f1"
+                      fillOpacity={0.3}
+                      name="Ilość sprzedana (szt.)"
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="text-center py-8 text-gray-500">
+                  <p className="text-sm">Brak danych do wyświetlenia dla wybranych filtrów</p>
+                  {(trendSymbol || trendModel) && (
+                    <p className="text-xs mt-1">Spróbuj zmienić kryteria wyszukiwania</p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Tabela sprzedanych towarów */}
+            {salesItemsLoading ? (
+              <div className="flex items-center justify-center h-32">
+                <RefreshCw className="w-6 h-6 animate-spin text-primary-600" />
+                <span className="ml-2 text-gray-600">Ładowanie listy sprzedanych towarów...</span>
+              </div>
+            ) : salesItemsError ? (
+              <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg">
+                <div className="flex items-start space-x-3">
+                  <div className="flex-shrink-0">
+                    <svg className="w-6 h-6 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <p className="font-medium text-amber-800">Nie można pobrać danych sprzedaży</p>
+                    <p className="text-sm text-amber-700 mt-1">{salesItemsError}</p>
+                    <p className="text-xs text-amber-600 mt-2">
+                      Upewnij się, że komputer ma dostęp do sieci lokalnej i serwer SQL Server jest uruchomiony.
+                    </p>
+                    <button
+                      onClick={() => { setSalesItemsError(null); fetchSalesItems(); }}
+                      className="mt-3 text-sm text-amber-700 hover:text-amber-900 underline flex items-center"
+                    >
+                      <RefreshCw className="w-4 h-4 mr-1" /> Spróbuj ponownie
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full bg-white">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600">Symbol</th>
+                      <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600">Nazwa</th>
+                      <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600">Marka</th>
+                      <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600">Rodzaj</th>
+                      <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600">Przeznaczenie</th>
+                      <th
+                        className="py-3 px-3 border-b text-right text-sm font-semibold text-gray-600 cursor-pointer hover:bg-gray-100"
+                        onClick={() => handleSort('IloscSprzedana')}
+                      >
+                        Ilość <SortIcon columnKey="IloscSprzedana" />
+                      </th>
+                      <th
+                        className="py-3 px-3 border-b text-right text-sm font-semibold text-gray-600 cursor-pointer hover:bg-gray-100"
+                        onClick={() => handleSort('WartoscBrutto')}
+                      >
+                        Wartość brutto <SortIcon columnKey="WartoscBrutto" />
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedSalesItems.slice(0, 100).map((item, index) => (
+                      <tr key={item.Symbol + index} className="hover:bg-gray-50">
+                        <td className="py-2 px-3 border-b text-sm text-gray-700 font-mono">{item.Symbol}</td>
+                        <td className="py-2 px-3 border-b text-sm text-gray-700 max-w-xs truncate" title={item.Nazwa}>{item.Nazwa}</td>
+                        <td className="py-2 px-3 border-b text-sm text-gray-700">{item.Marka}</td>
+                        <td className="py-2 px-3 border-b text-sm text-gray-700">{item.Rodzaj}</td>
+                        <td className="py-2 px-3 border-b text-sm text-gray-700">{item.Przeznaczenie}</td>
+                        <td className="py-2 px-3 border-b text-sm text-gray-700 text-right">{formatNumber(item.IloscSprzedana, 0)}</td>
+                        <td className="py-2 px-3 border-b text-sm text-gray-700 text-right font-medium">{formatNumber(item.WartoscBrutto)} zł</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {sortedSalesItems.length > 100 && (
+                  <div className="p-4 text-center text-sm text-gray-500">
+                    Wyświetlono 100 z {sortedSalesItems.length} produktów (sortowanie: {sortConfig.key})
+                  </div>
+                )}
+                {sortedSalesItems.length === 0 && !salesItemsLoading && (
+                  <div className="p-8 text-center text-gray-500">
+                    <p className="text-lg font-medium">Brak sprzedaży w wybranym okresie</p>
+                    <p className="text-sm mt-2">Spróbuj zmienić zakres dat lub filtry</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Podsumowanie */}
+            {sortedSalesItems.length > 0 && (
+              <div className="border-t pt-4 mt-4">
+                <div className="grid grid-cols-3 gap-4 text-center">
+                  <div className="bg-blue-50 rounded-lg p-3">
+                    <p className="text-sm text-gray-600">Łączna ilość sprzedana</p>
+                    <p className="text-xl font-bold text-blue-700">
+                      {formatNumber(sortedSalesItems.reduce((sum, item) => sum + item.IloscSprzedana, 0), 0)} szt.
+                    </p>
+                  </div>
+                  <div className="bg-green-50 rounded-lg p-3">
+                    <p className="text-sm text-gray-600">Łączna wartość brutto</p>
+                    <p className="text-xl font-bold text-green-700">
+                      {formatNumber(sortedSalesItems.reduce((sum, item) => sum + item.WartoscBrutto, 0), 2)} zł
+                    </p>
+                  </div>
+                  <div className="bg-purple-50 rounded-lg p-3">
+                    <p className="text-sm text-gray-600">Liczba produktów</p>
+                    <p className="text-xl font-bold text-purple-700">{sortedSalesItems.length}</p>
+                  </div>
+                </div>
+              </div>
+            )}
+          </>
+        )}
       </div>
     </div>
   )

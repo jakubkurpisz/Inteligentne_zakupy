@@ -644,6 +644,365 @@ async def get_sales_history(
         )
 
 
+@app.get("/api/sales-items")
+async def get_sales_items(
+    start_date: str,
+    end_date: str,
+    mag_ids: Optional[str] = None,
+    rodzaj: Optional[str] = None,
+    przeznaczenie: Optional[str] = None,
+    marka: Optional[str] = None,
+    limit: int = 500
+):
+    """
+    Pobiera listę sprzedanych produktów z SQL Server z możliwością filtrowania.
+
+    Parametry:
+    - start_date: Data początkowa (YYYY-MM-DD)
+    - end_date: Data końcowa (YYYY-MM-DD)
+    - mag_ids: ID magazynów (np. "1,7,9")
+    - rodzaj: Filtr po rodzaju produktu
+    - przeznaczenie: Filtr po przeznaczeniu produktu
+    - marka: Filtr po marce
+    - limit: Maksymalna liczba rekordów (domyślnie 500)
+    """
+    try:
+        # Połączenie z SQL Server
+        server = os.getenv('SQL_SERVER', r'10.101.101.5\INSERTGT')
+        database = os.getenv('SQL_DATABASE', 'Sporting_Leszno')
+        username = os.getenv('SQL_USERNAME', 'zestawienia2')
+        password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
+
+        try:
+            sql_connection = pyodbc.connect(
+                'DRIVER={ODBC Driver 18 for SQL Server};'
+                f'SERVER={server};'
+                f'DATABASE={database};'
+                f'UID={username};'
+                f'PWD={password};'
+                'TrustServerCertificate=yes;'
+                'Connection Timeout=30;'
+            )
+        except pyodbc.Error as conn_err:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Błąd połączenia z SQL Server: {str(conn_err)}"
+            )
+
+        sql_cursor = sql_connection.cursor()
+
+        # Parsowanie mag_ids
+        if mag_ids:
+            mag_id_list = [int(x.strip()) for x in mag_ids.split(',') if x.strip().isdigit()]
+        else:
+            mag_id_list = [1, 7, 9]
+
+        mag_placeholders = ','.join(['?' for _ in mag_id_list])
+
+        # Buduj zapytanie SQL dla sprzedaży z filtrami
+        # Nazwy kolumn w SQL Server: tw_Pole2 = Marka, tw_pole1 = Rozmiar
+        query = f"""
+        SELECT
+            tw.tw_Symbol AS Symbol,
+            tw.tw_Nazwa AS Nazwa,
+            tw.tw_Pole2 AS Marka,
+            tw.tw_pole1 AS Rozmiar,
+            tw.tw_pole7 AS Przeznaczenie,
+            tw.tw_pole8 AS Rodzaj,
+            SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_IloscMag ELSE ob_IloscMag END) AS IloscSprzedana,
+            SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_WartNetto ELSE ob_WartNetto END) AS WartoscNetto,
+            SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_WartBrutto ELSE ob_WartBrutto END) AS WartoscBrutto,
+            COUNT(DISTINCT dok_NrPelny) AS LiczbaTransakcji
+        FROM vwZstSprzWgKhnt
+        LEFT JOIN tw__Towar tw ON ob_TowId = tw.tw_Id
+        WHERE CAST(dok_DataWyst AS DATE) >= ?
+            AND CAST(dok_DataWyst AS DATE) <= ?
+            AND dok_MagId IN ({mag_placeholders})
+            AND dok_Podtyp <> 1
+            AND dok_Status <> 2
+        """
+
+        params = [start_date, end_date] + mag_id_list
+
+        # Dodaj filtr rodzaju
+        if rodzaj:
+            query += " AND tw.tw_pole8 = ?"
+            params.append(rodzaj)
+
+        # Dodaj filtr przeznaczenia
+        if przeznaczenie:
+            query += " AND tw.tw_pole7 = ?"
+            params.append(przeznaczenie)
+
+        # Dodaj filtr marki
+        if marka:
+            query += " AND tw.tw_Pole2 = ?"
+            params.append(marka)
+
+        query += """
+        GROUP BY tw.tw_Symbol, tw.tw_Nazwa, tw.tw_Pole2, tw.tw_pole1, tw.tw_pole7, tw.tw_pole8
+        HAVING SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_WartBrutto ELSE ob_WartBrutto END) > 0
+        ORDER BY SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_WartBrutto ELSE ob_WartBrutto END) DESC
+        """
+
+        sql_cursor.execute(query, params)
+        rows = sql_cursor.fetchmany(limit)
+
+        items = []
+        for row in rows:
+            items.append({
+                "Symbol": row[0] or "",
+                "Nazwa": row[1] or "",
+                "Marka": row[2] or "",
+                "Rozmiar": row[3] or "",
+                "Przeznaczenie": row[4] or "",
+                "Rodzaj": row[5] or "",
+                "IloscSprzedana": float(row[6] or 0),
+                "WartoscNetto": round(float(row[7] or 0), 2),
+                "WartoscBrutto": round(float(row[8] or 0), 2),
+                "LiczbaTransakcji": int(row[9] or 0)
+            })
+
+        # Pobierz unikalne wartości dla filtrów z SQL Server
+        filter_query = """
+        SELECT DISTINCT tw.tw_pole8 AS Rodzaj
+        FROM tw__Towar tw
+        WHERE tw.tw_pole8 IS NOT NULL AND tw.tw_pole8 != ''
+        ORDER BY tw.tw_pole8
+        """
+        sql_cursor.execute(filter_query)
+        rodzaje = [row[0] for row in sql_cursor.fetchall()]
+
+        filter_query = """
+        SELECT DISTINCT tw.tw_pole7 AS Przeznaczenie
+        FROM tw__Towar tw
+        WHERE tw.tw_pole7 IS NOT NULL AND tw.tw_pole7 != ''
+        ORDER BY tw.tw_pole7
+        """
+        sql_cursor.execute(filter_query)
+        przeznaczenia = [row[0] for row in sql_cursor.fetchall()]
+
+        filter_query = """
+        SELECT DISTINCT tw.tw_Pole2 AS Marka
+        FROM tw__Towar tw
+        WHERE tw.tw_Pole2 IS NOT NULL AND tw.tw_Pole2 != ''
+        ORDER BY tw.tw_Pole2
+        """
+        sql_cursor.execute(filter_query)
+        marki = [row[0] for row in sql_cursor.fetchall()]
+
+        sql_connection.close()
+
+        return {
+            "success": True,
+            "total_items": len(items),
+            "start_date": start_date,
+            "end_date": end_date,
+            "items": items,
+            "filters": {
+                "rodzaje": rodzaje,
+                "przeznaczenia": przeznaczenia,
+                "marki": marki
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd podczas pobierania listy sprzedanych towarów: {str(e)}"
+        )
+
+
+@app.get("/api/sales-items-trend")
+async def get_sales_items_trend(
+    start_date: str,
+    end_date: str,
+    mag_ids: Optional[str] = None,
+    rodzaj: Optional[str] = None,
+    przeznaczenie: Optional[str] = None,
+    symbol: Optional[str] = None,
+    model: Optional[str] = None,
+    group_by: str = "day"
+):
+    """
+    Pobiera trend sprzedaży z SQL Server z możliwością filtrowania.
+
+    Parametry:
+    - start_date: Data początkowa (YYYY-MM-DD)
+    - end_date: Data końcowa (YYYY-MM-DD)
+    - mag_ids: ID magazynów
+    - rodzaj: Filtr po rodzaju produktu
+    - przeznaczenie: Filtr po przeznaczeniu produktu
+    - symbol: Filtr po symbolu produktu (wyszukiwanie częściowe)
+    - model: Filtr po modelu produktu (ModelSp - wyszukiwanie częściowe)
+    - group_by: Grupowanie - day (dzień), week (tydzień), month (miesiąc)
+    """
+    try:
+        # Połączenie z SQL Server
+        server = os.getenv('SQL_SERVER', r'10.101.101.5\INSERTGT')
+        database = os.getenv('SQL_DATABASE', 'Sporting_Leszno')
+        username = os.getenv('SQL_USERNAME', 'zestawienia2')
+        password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
+
+        try:
+            sql_connection = pyodbc.connect(
+                'DRIVER={ODBC Driver 18 for SQL Server};'
+                f'SERVER={server};'
+                f'DATABASE={database};'
+                f'UID={username};'
+                f'PWD={password};'
+                'TrustServerCertificate=yes;'
+                'Connection Timeout=30;'
+            )
+        except pyodbc.Error as conn_err:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Błąd połączenia z SQL Server: {str(conn_err)}"
+            )
+
+        sql_cursor = sql_connection.cursor()
+
+        # Parsowanie mag_ids
+        if mag_ids:
+            mag_id_list = [int(x.strip()) for x in mag_ids.split(',') if x.strip().isdigit()]
+        else:
+            mag_id_list = [1, 7, 9]
+
+        mag_placeholders = ','.join(['?' for _ in mag_id_list])
+
+        # Buduj zapytanie w zależności od grupowania
+        if group_by == "week":
+            date_select = "CONCAT(YEAR(dok_DataWyst), '-W', FORMAT(DATEPART(WEEK, dok_DataWyst), '00')) AS Data"
+            group_clause = "CONCAT(YEAR(dok_DataWyst), '-W', FORMAT(DATEPART(WEEK, dok_DataWyst), '00'))"
+        elif group_by == "month":
+            date_select = "FORMAT(dok_DataWyst, 'yyyy-MM') AS Data"
+            group_clause = "FORMAT(dok_DataWyst, 'yyyy-MM')"
+        else:  # day
+            date_select = "CAST(dok_DataWyst AS DATE) AS Data"
+            group_clause = "CAST(dok_DataWyst AS DATE)"
+
+        query = f"""
+        SELECT
+            {date_select},
+            SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_IloscMag ELSE ob_IloscMag END) AS IloscSprzedana,
+            SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_WartNetto ELSE ob_WartNetto END) AS WartoscNetto,
+            SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_WartBrutto ELSE ob_WartBrutto END) AS WartoscBrutto,
+            COUNT(DISTINCT ob_TowId) AS LiczbaProduktow,
+            COUNT(DISTINCT dok_NrPelny) AS LiczbaTransakcji
+        FROM vwZstSprzWgKhnt
+        LEFT JOIN tw__Towar tw ON ob_TowId = tw.tw_Id
+        WHERE CAST(dok_DataWyst AS DATE) >= ?
+            AND CAST(dok_DataWyst AS DATE) <= ?
+            AND dok_MagId IN ({mag_placeholders})
+            AND dok_Podtyp <> 1
+            AND dok_Status <> 2
+        """
+
+        params = [start_date, end_date] + mag_id_list
+
+        # Dodaj filtr rodzaju
+        if rodzaj:
+            query += " AND tw.tw_pole8 = ?"
+            params.append(rodzaj)
+
+        # Dodaj filtr przeznaczenia
+        if przeznaczenie:
+            query += " AND tw.tw_pole7 = ?"
+            params.append(przeznaczenie)
+
+        # Dodaj filtr symbolu (wyszukiwanie częściowe)
+        if symbol:
+            query += " AND tw.tw_Symbol LIKE ?"
+            params.append(f"%{symbol}%")
+
+        # Dodaj filtr modelu (tw_pole3 - wyszukiwanie częściowe)
+        if model:
+            query += " AND tw.tw_pole3 LIKE ?"
+            params.append(f"%{model}%")
+
+        query += f"""
+        GROUP BY {group_clause}
+        ORDER BY {group_clause}
+        """
+
+        sql_cursor.execute(query, params)
+        rows = sql_cursor.fetchall()
+
+        trend_data = []
+        for row in rows:
+            data_value = row[0]
+            if hasattr(data_value, 'strftime'):
+                data_str = data_value.strftime('%Y-%m-%d')
+            else:
+                data_str = str(data_value) if data_value else ""
+
+            trend_data.append({
+                "Data": data_str,
+                "IloscSprzedana": float(row[1] or 0),
+                "WartoscNetto": float(row[2] or 0),
+                "WartoscBrutto": float(row[3] or 0),
+                "LiczbaProduktow": int(row[4] or 0),
+                "LiczbaTransakcji": int(row[5] or 0)
+            })
+
+        sql_connection.close()
+
+        return {
+            "success": True,
+            "group_by": group_by,
+            "start_date": start_date,
+            "end_date": end_date,
+            "data": trend_data
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd podczas pobierania trendu: {str(e)}"
+        )
+
+
+@app.get("/api/sales-items/filters")
+async def get_sales_items_filters():
+    """
+    Pobiera dostępne wartości filtrów (Rodzaj, Przeznaczenie, Marka) z bazy produktów.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Pobierz unikalne rodzaje
+        cursor.execute("SELECT DISTINCT Rodzaj FROM products WHERE Rodzaj IS NOT NULL AND Rodzaj != '' ORDER BY Rodzaj")
+        rodzaje = [row[0] for row in cursor.fetchall()]
+
+        # Pobierz unikalne przeznaczenia
+        cursor.execute("SELECT DISTINCT Przeznaczenie FROM products WHERE Przeznaczenie IS NOT NULL AND Przeznaczenie != '' ORDER BY Przeznaczenie")
+        przeznaczenia = [row[0] for row in cursor.fetchall()]
+
+        # Pobierz unikalne marki
+        cursor.execute("SELECT DISTINCT Marka FROM products WHERE Marka IS NOT NULL AND Marka != '' ORDER BY Marka")
+        marki = [row[0] for row in cursor.fetchall()]
+
+        cursor.close()
+        conn.close()
+
+        return {
+            "rodzaje": rodzaje,
+            "przeznaczenia": przeznaczenia,
+            "marki": marki
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd podczas pobierania filtrów: {str(e)}"
+        )
+
+
 @app.get("/api/stats")
 async def get_statistics():
     """Pobiera statystyki bazy danych"""
@@ -805,13 +1164,23 @@ async def get_dashboard_stats(force_refresh: bool = False):
 
         # Mapowanie dni tygodnia
         day_names = ['Pon', 'Wt', 'Śr', 'Czw', 'Pt', 'Sob', 'Nd']
-        weekly_sales = []
+
+        # Stwórz słownik z danymi sprzedaży
+        sales_by_date = {}
         for row in weekly_rows:
-            day_name = day_names[row[0].weekday()]
+            sales_by_date[row[0].strftime('%Y-%m-%d')] = float(row[1] or 0)
+
+        # Wygeneruj wszystkie 7 dni (nawet z zerową sprzedażą)
+        weekly_sales = []
+        for i in range(7, -1, -1):  # 7 dni wstecz do dziś (8 dni łącznie)
+            day_date = today - timedelta(days=i)
+            date_str = day_date.strftime('%Y-%m-%d')
+            day_name = day_names[day_date.weekday()]
+            sprzedaz = sales_by_date.get(date_str, 0)
             weekly_sales.append({
-                "name": day_name,
-                "data": row[0].strftime('%Y-%m-%d'),
-                "sprzedaz": float(row[1] or 0)
+                "name": f"{day_name} {day_date.strftime('%d.%m')}",
+                "data": date_str,
+                "sprzedaz": sprzedaz
             })
 
         # Top 5 produktów (ostatnie 30 dni)
@@ -1793,6 +2162,141 @@ async def delete_custom_stock_period(symbol: str):
         )
 
 
+@app.get("/api/product-seasonality")
+async def get_product_seasonality():
+    """
+    Oblicza sezonowość produktów na podstawie współczynnika zmienności (CV) sprzedaży miesięcznej.
+
+    CV = Odchylenie standardowe / Średnia
+
+    Klasyfikacja:
+    - Stabilny (Całoroczny): CV < 0.2 (poniżej 20%)
+    - Zmienny popyt: CV 0.2 - 0.5 (20% - 50%)
+    - Sezonowy (nieregularny): CV > 0.5 (powyżej 50%)
+
+    Dane: sprzedaż miesięczna z ostatnich 12 miesięcy
+    """
+    try:
+        # Połączenie z SQL Server
+        server = os.getenv('SQL_SERVER', '10.10.1.5\\SUBIEKT')
+        database = os.getenv('SQL_DATABASE', 'Nexo_Wilczek')
+        username = os.getenv('SQL_USERNAME', 'sa')
+        password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
+
+        sql_connection = pyodbc.connect(
+            'DRIVER={ODBC Driver 18 for SQL Server};'
+            f'SERVER={server};'
+            f'DATABASE={database};'
+            f'UID={username};'
+            f'PWD={password};'
+            'TrustServerCertificate=yes;'
+            'Connection Timeout=30;'
+        )
+        sql_cursor = sql_connection.cursor()
+
+        # Pobierz sprzedaż miesięczną dla każdego produktu z ostatnich 12 miesięcy
+        query = """
+        SELECT
+            tw.tw_Symbol AS Symbol,
+            YEAR(dok_DataWyst) AS Rok,
+            MONTH(dok_DataWyst) AS Miesiac,
+            SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_IloscMag ELSE ob_IloscMag END) AS IloscSprzedana
+        FROM vwZstSprzWgKhnt
+        LEFT JOIN tw__Towar tw ON ob_TowId = tw.tw_Id
+        WHERE dok_DataWyst >= DATEADD(month, -12, GETDATE())
+            AND dok_MagId IN (1,7,9)
+            AND dok_Podtyp <> 1
+            AND dok_Status <> 2
+        GROUP BY tw.tw_Symbol, YEAR(dok_DataWyst), MONTH(dok_DataWyst)
+        ORDER BY tw.tw_Symbol, Rok, Miesiac
+        """
+
+        sql_cursor.execute(query)
+        rows = sql_cursor.fetchall()
+        sql_cursor.close()
+        sql_connection.close()
+
+        # Grupuj sprzedaż miesięczną po symbolu
+        sales_by_product = {}
+        for row in rows:
+            symbol = row[0]
+            ilosc = float(row[3] or 0)
+
+            if symbol not in sales_by_product:
+                sales_by_product[symbol] = []
+            sales_by_product[symbol].append(ilosc)
+
+        # Oblicz CV dla każdego produktu
+        seasonality_data = {}
+        for symbol, monthly_sales in sales_by_product.items():
+            if len(monthly_sales) < 2:
+                # Za mało danych - oznacz jako brak danych
+                seasonality_data[symbol] = {
+                    "cv": None,
+                    "category": "BRAK_DANYCH",
+                    "monthly_sales": monthly_sales,
+                    "avg": 0,
+                    "std": 0
+                }
+                continue
+
+            # Oblicz średnią
+            avg = sum(monthly_sales) / len(monthly_sales)
+
+            if avg == 0:
+                # Brak sprzedaży
+                seasonality_data[symbol] = {
+                    "cv": None,
+                    "category": "BRAK_SPRZEDAZY",
+                    "monthly_sales": monthly_sales,
+                    "avg": 0,
+                    "std": 0
+                }
+                continue
+
+            # Oblicz odchylenie standardowe populacji
+            variance = sum((x - avg) ** 2 for x in monthly_sales) / len(monthly_sales)
+            std = math.sqrt(variance)
+
+            # Oblicz CV (współczynnik zmienności)
+            cv = std / avg
+
+            # Klasyfikacja
+            if cv < 0.2:
+                category = "STABILNY"
+            elif cv <= 0.5:
+                category = "ZMIENNY"
+            else:
+                category = "SEZONOWY"
+
+            seasonality_data[symbol] = {
+                "cv": round(cv, 3),
+                "category": category,
+                "monthly_sales": monthly_sales,
+                "avg": round(avg, 2),
+                "std": round(std, 2)
+            }
+
+        return {
+            "success": True,
+            "total_products": len(seasonality_data),
+            "data": seasonality_data,
+            "classification": {
+                "STABILNY": "CV < 0.2 - Produkt całoroczny, stabilna sprzedaż",
+                "ZMIENNY": "CV 0.2-0.5 - Produkt o zmiennym popycie",
+                "SEZONOWY": "CV > 0.5 - Produkt sezonowy lub nieregularny",
+                "BRAK_DANYCH": "Za mało danych (< 2 miesiące)",
+                "BRAK_SPRZEDAZY": "Brak sprzedaży w ostatnich 12 miesiącach"
+            }
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd podczas obliczania sezonowości: {str(e)}"
+        )
+
+
 def run_data_sync():
     """Funkcja uruchamiająca synchronizację danych"""
     if not sync_lock.acquire(blocking=False):
@@ -1835,6 +2339,575 @@ def run_data_sync():
         print("="*60 + "\n")
     finally:
         sync_lock.release()
+
+
+@app.post("/api/sync-purchase-prices")
+async def sync_purchase_prices():
+    """
+    Synchronizuje ceny zakupu z dokumentów PZ (z powiązanej FZ) i PW z SQL Server.
+    Dla PZ - cena z powiązanej faktury zakupu FZ
+    Dla PW - cena bezpośrednio z pozycji dokumentu PW
+    """
+    try:
+        # Połączenie z SQL Server
+        server = os.getenv('SQL_SERVER', r'10.101.101.5\INSERTGT')
+        database = os.getenv('SQL_DATABASE', 'Sporting_Leszno')
+        username = os.getenv('SQL_USERNAME', 'zestawienia2')
+        password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
+
+        try:
+            sql_connection = pyodbc.connect(
+                'DRIVER={ODBC Driver 18 for SQL Server};'
+                f'SERVER={server};'
+                f'DATABASE={database};'
+                f'UID={username};'
+                f'PWD={password};'
+                'TrustServerCertificate=yes;'
+                'Connection Timeout=30;'
+            )
+        except pyodbc.Error as conn_err:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Błąd połączenia z SQL Server: {str(conn_err)}"
+            )
+
+        sql_cursor = sql_connection.cursor()
+
+        # Pobierz ostatnią cenę zakupu dla każdego produktu:
+        # 1. Z dokumentów PZ - cenę bierzemy z powiązanej faktury FZ (przez ob_DokHanId)
+        # 2. Z dokumentów PW - cenę bierzemy bezpośrednio z pozycji PW
+        query = """
+        WITH PurchasePrices AS (
+            -- Ceny z PZ powiązanych z FZ (cena z faktury zakupu)
+            SELECT
+                tw.tw_Symbol AS Symbol,
+                fz_poz.ob_CenaNetto AS CenaZakupuNetto,
+                COALESCE(sl.sl_Nazwa, '') AS Grupa,
+                pz.dok_DataWyst AS DataDok,
+                ROW_NUMBER() OVER (PARTITION BY tw.tw_Symbol ORDER BY pz.dok_DataWyst DESC) AS rn
+            FROM dok__Dokument pz
+            INNER JOIN dok_Pozycja pz_poz ON pz.dok_Id = pz_poz.ob_DokMagId
+            INNER JOIN dok__Dokument fz ON pz_poz.ob_DokHanId = fz.dok_Id
+            INNER JOIN dok_Pozycja fz_poz ON fz.dok_Id = fz_poz.ob_DokHanId AND pz_poz.ob_TowId = fz_poz.ob_TowId
+            INNER JOIN tw__Towar tw ON pz_poz.ob_TowId = tw.tw_Id
+            LEFT JOIN sl__Slownik sl ON tw.tw_IdGrupa = sl.sl_Id
+            WHERE pz.dok_NrPelny LIKE 'PZ%'
+                AND fz.dok_NrPelny LIKE 'FZ%'
+                AND pz.dok_Status <> 2
+                AND fz_poz.ob_CenaNetto > 0
+
+            UNION ALL
+
+            -- Ceny z PW (bezpośrednio z pozycji dokumentu)
+            SELECT
+                tw.tw_Symbol AS Symbol,
+                pw_poz.ob_CenaNetto AS CenaZakupuNetto,
+                COALESCE(sl.sl_Nazwa, '') AS Grupa,
+                pw.dok_DataWyst AS DataDok,
+                ROW_NUMBER() OVER (PARTITION BY tw.tw_Symbol ORDER BY pw.dok_DataWyst DESC) AS rn
+            FROM dok__Dokument pw
+            INNER JOIN dok_Pozycja pw_poz ON pw.dok_Id = pw_poz.ob_DokMagId
+            INNER JOIN tw__Towar tw ON pw_poz.ob_TowId = tw.tw_Id
+            LEFT JOIN sl__Slownik sl ON tw.tw_IdGrupa = sl.sl_Id
+            WHERE pw.dok_NrPelny LIKE 'PW%'
+                AND pw.dok_Status <> 2
+                AND pw_poz.ob_CenaNetto > 0
+        ),
+        LatestPrices AS (
+            SELECT Symbol, CenaZakupuNetto, Grupa,
+                   ROW_NUMBER() OVER (PARTITION BY Symbol ORDER BY DataDok DESC) AS final_rn
+            FROM PurchasePrices
+        )
+        SELECT Symbol, CenaZakupuNetto, Grupa
+        FROM LatestPrices
+        WHERE final_rn = 1
+        """
+
+        sql_cursor.execute(query)
+        rows = sql_cursor.fetchall()
+        sql_connection.close()
+
+        # Aktualizuj lokalną bazę SQLite
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        updated_count = 0
+        for row in rows:
+            symbol = row[0]
+            cena_zakupu = float(row[1] or 0)
+            grupa = row[2] or ''
+
+            cursor.execute("""
+                UPDATE products
+                SET CenaZakupuNetto = ?,
+                    Grupa = ?
+                WHERE Symbol = ?
+            """, (cena_zakupu, grupa, symbol))
+
+            if cursor.rowcount > 0:
+                updated_count += 1
+
+        conn.commit()
+        conn.close()
+
+        return {
+            "success": True,
+            "message": f"Zaktualizowano ceny zakupu dla {updated_count} produktów",
+            "updated_count": updated_count,
+            "total_found": len(rows)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd podczas synchronizacji cen zakupu: {str(e)}"
+        )
+
+
+@app.get("/api/products-with-prices")
+async def get_products_with_prices(limit: int = 100, search: Optional[str] = None):
+    """
+    Pobiera produkty wraz z cenami zakupu i sprzedaży.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        query = """
+        SELECT Symbol, Nazwa, Marka, Rodzaj, Grupa, Stan,
+               CenaZakupuNetto, StawkaVAT, DetalicznaNetto, DetalicznaBrutto,
+               Rozmiar, Kolor, Przeznaczenie
+        FROM products
+        WHERE Stan > 0
+        """
+        params = []
+
+        if search:
+            query += " AND (Symbol LIKE ? OR Nazwa LIKE ? OR Marka LIKE ?)"
+            search_param = f"%{search}%"
+            params.extend([search_param, search_param, search_param])
+
+        query += " ORDER BY Stan DESC LIMIT ?"
+        params.append(limit)
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+
+        products = []
+        for row in rows:
+            cena_zakupu = float(row[6] or 0)
+            stawka_vat = float(row[7] or 23)
+            cena_detal_netto = float(row[8] or 0)
+            cena_detal_brutto = float(row[9] or 0)
+            stan = float(row[5] or 0)
+
+            # Oblicz wartości
+            cena_zakupu_brutto = cena_zakupu * (1 + stawka_vat / 100)
+            wartosc_zakupu = cena_zakupu * stan
+            wartosc_sprzedazy = cena_detal_netto * stan
+
+            # Oblicz marżę
+            marza_proc = 0
+            if cena_zakupu > 0:
+                marza_proc = ((cena_detal_netto - cena_zakupu) / cena_zakupu) * 100
+
+            products.append({
+                "Symbol": row[0] or "",
+                "Nazwa": row[1] or "",
+                "Marka": row[2] or "",
+                "Rodzaj": row[3] or "",
+                "Grupa": row[4] or "",
+                "Stan": stan,
+                "CenaZakupuNetto": round(cena_zakupu, 2),
+                "CenaZakupuBrutto": round(cena_zakupu_brutto, 2),
+                "StawkaVAT": stawka_vat,
+                "DetalicznaNetto": round(cena_detal_netto, 2),
+                "DetalicznaBrutto": round(cena_detal_brutto, 2),
+                "WartoscZakupu": round(wartosc_zakupu, 2),
+                "WartoscSprzedazy": round(wartosc_sprzedazy, 2),
+                "MarzaProc": round(marza_proc, 1),
+                "Rozmiar": row[10] or "",
+                "Kolor": row[11] or "",
+                "Przeznaczenie": row[12] or ""
+            })
+
+        conn.close()
+
+        return {
+            "success": True,
+            "count": len(products),
+            "products": products
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd podczas pobierania produktów: {str(e)}"
+        )
+
+
+@app.get("/api/test-purchase-docs")
+async def test_purchase_docs():
+    """
+    Endpoint testowy - sprawdza typy dokumentów i przykładowe dane zakupowe w SQL Server.
+    Szuka dokumentów PW (Przyjęcie Wewnętrzne) z ruchu towarów.
+    """
+    try:
+        server = os.getenv('SQL_SERVER', r'10.101.101.5\INSERTGT')
+        database = os.getenv('SQL_DATABASE', 'Sporting_Leszno')
+        username = os.getenv('SQL_USERNAME', 'zestawienia2')
+        password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
+
+        sql_connection = pyodbc.connect(
+            'DRIVER={ODBC Driver 18 for SQL Server};'
+            f'SERVER={server};'
+            f'DATABASE={database};'
+            f'UID={username};'
+            f'PWD={password};'
+            'TrustServerCertificate=yes;'
+            'Connection Timeout=30;'
+        )
+        sql_cursor = sql_connection.cursor()
+
+        # Sprawdź unikalne typy dokumentów
+        sql_cursor.execute("SELECT DISTINCT dok_Typ FROM dok__Dokument ORDER BY dok_Typ")
+        doc_types = [row[0] for row in sql_cursor.fetchall()]
+
+        # Sprawdź przykładowe dokumenty PW i PZ (numer zaczynający się od PW lub PZ)
+        sql_cursor.execute("""
+            SELECT TOP 10 d.dok_Typ, d.dok_NrPelny, d.dok_DataWyst,
+                   dp.ob_CenaNetto, tw.tw_Symbol, tw.tw_Nazwa
+            FROM dok__Dokument d
+            INNER JOIN dok_Pozycja dp ON d.dok_Id = dp.ob_DokMagId
+            INNER JOIN tw__Towar tw ON dp.ob_TowId = tw.tw_Id
+            WHERE (d.dok_NrPelny LIKE 'PW%' OR d.dok_NrPelny LIKE 'PZ%')
+                AND dp.ob_CenaNetto > 0
+            ORDER BY d.dok_DataWyst DESC
+        """)
+        pw_docs = []
+        for row in sql_cursor.fetchall():
+            pw_docs.append({
+                "dok_Typ": row[0],
+                "dok_NrPelny": row[1],
+                "dok_DataWyst": str(row[2]) if row[2] else None,
+                "ob_CenaNetto": float(row[3]) if row[3] else 0,
+                "tw_Symbol": row[4],
+                "tw_Nazwa": row[5]
+            })
+
+        # Policz dokumenty PW i PZ
+        sql_cursor.execute("""
+            SELECT COUNT(DISTINCT d.dok_Id) as LiczbaDok,
+                   COUNT(DISTINCT tw.tw_Symbol) as LiczbaProduktow
+            FROM dok__Dokument d
+            INNER JOIN dok_Pozycja dp ON d.dok_Id = dp.ob_DokMagId
+            INNER JOIN tw__Towar tw ON dp.ob_TowId = tw.tw_Id
+            WHERE (d.dok_NrPelny LIKE 'PW%' OR d.dok_NrPelny LIKE 'PZ%')
+                AND dp.ob_CenaNetto > 0
+        """)
+        pw_stats = sql_cursor.fetchone()
+
+        # Sprawdź też jakie prefiksy dokumentów występują
+        sql_cursor.execute("""
+            SELECT TOP 20 LEFT(dok_NrPelny, 2) as Prefix, COUNT(*) as Liczba
+            FROM dok__Dokument
+            WHERE dok_NrPelny IS NOT NULL
+            GROUP BY LEFT(dok_NrPelny, 2)
+            ORDER BY COUNT(*) DESC
+        """)
+        doc_prefixes = []
+        for row in sql_cursor.fetchall():
+            doc_prefixes.append({"prefix": row[0], "count": row[1]})
+
+        sql_connection.close()
+
+        return {
+            "success": True,
+            "all_doc_types": doc_types,
+            "doc_prefixes": doc_prefixes,
+            "pw_documents_count": pw_stats[0] if pw_stats else 0,
+            "pw_products_count": pw_stats[1] if pw_stats else 0,
+            "sample_pw_docs": pw_docs
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd: {str(e)}"
+        )
+
+
+@app.get("/api/test-doc-links")
+async def test_doc_links():
+    """
+    Endpoint testowy - sprawdza strukturę powiązań dokumentów w SQL Server.
+    """
+    try:
+        server = os.getenv('SQL_SERVER', r'10.101.101.5\INSERTGT')
+        database = os.getenv('SQL_DATABASE', 'Sporting_Leszno')
+        username = os.getenv('SQL_USERNAME', 'zestawienia2')
+        password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
+
+        sql_connection = pyodbc.connect(
+            'DRIVER={ODBC Driver 18 for SQL Server};'
+            f'SERVER={server};'
+            f'DATABASE={database};'
+            f'UID={username};'
+            f'PWD={password};'
+            'TrustServerCertificate=yes;'
+            'Connection Timeout=30;'
+        )
+        sql_cursor = sql_connection.cursor()
+
+        # Sprawdź kolumny tabeli dok__Dokument
+        sql_cursor.execute("""
+            SELECT COLUMN_NAME, DATA_TYPE
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = 'dok__Dokument'
+            ORDER BY ORDINAL_POSITION
+        """)
+        doc_columns = [{"name": row[0], "type": row[1]} for row in sql_cursor.fetchall()]
+
+        # Sprawdź kolumny tabeli dok_Pozycja
+        sql_cursor.execute("""
+            SELECT COLUMN_NAME, DATA_TYPE
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = 'dok_Pozycja'
+            ORDER BY ORDINAL_POSITION
+        """)
+        pos_columns = [{"name": row[0], "type": row[1]} for row in sql_cursor.fetchall()]
+
+        # Sprawdź tabele z powiązaniami dokumentów
+        sql_cursor.execute("""
+            SELECT TABLE_NAME
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_NAME LIKE '%dok%' OR TABLE_NAME LIKE '%pow%' OR TABLE_NAME LIKE '%link%'
+            ORDER BY TABLE_NAME
+        """)
+        related_tables = [row[0] for row in sql_cursor.fetchall()]
+
+        # Szukaj powiązań PZ z FZ poprzez ob_DokHanId
+        sql_cursor.execute("""
+            SELECT TOP 10
+                pz.dok_NrPelny AS PZ_Nr,
+                fz.dok_NrPelny AS FZ_Nr,
+                fz_poz.ob_CenaNetto AS CenaZFZ,
+                tw.tw_Symbol,
+                tw.tw_Nazwa
+            FROM dok__Dokument pz
+            INNER JOIN dok_Pozycja pz_poz ON pz.dok_Id = pz_poz.ob_DokMagId
+            INNER JOIN dok__Dokument fz ON pz_poz.ob_DokHanId = fz.dok_Id
+            INNER JOIN dok_Pozycja fz_poz ON fz.dok_Id = fz_poz.ob_DokHanId AND pz_poz.ob_TowId = fz_poz.ob_TowId
+            INNER JOIN tw__Towar tw ON pz_poz.ob_TowId = tw.tw_Id
+            WHERE pz.dok_NrPelny LIKE 'PZ%'
+                AND fz.dok_NrPelny LIKE 'FZ%'
+                AND fz_poz.ob_CenaNetto > 0
+            ORDER BY pz.dok_DataWyst DESC
+        """)
+        pz_fz_links = []
+        for row in sql_cursor.fetchall():
+            pz_fz_links.append({
+                "PZ_Nr": row[0],
+                "FZ_Nr": row[1],
+                "CenaZFZ": float(row[2]) if row[2] else 0,
+                "Symbol": row[3],
+                "Nazwa": row[4]
+            })
+
+        # Sprawdź PW z powiązanymi dokumentami (przez dok_DoDokId)
+        sql_cursor.execute("""
+            SELECT TOP 10
+                pw.dok_NrPelny AS PW_Nr,
+                pw.dok_DoDokNrPelny AS Powiazany_Nr,
+                poz.ob_CenaNetto AS CenaNaPW,
+                tw.tw_Symbol,
+                tw.tw_Nazwa
+            FROM dok__Dokument pw
+            INNER JOIN dok_Pozycja poz ON pw.dok_Id = poz.ob_DokMagId
+            INNER JOIN tw__Towar tw ON poz.ob_TowId = tw.tw_Id
+            WHERE pw.dok_NrPelny LIKE 'PW%'
+                AND poz.ob_CenaNetto > 0
+            ORDER BY pw.dok_DataWyst DESC
+        """)
+        pw_links = []
+        for row in sql_cursor.fetchall():
+            pw_links.append({
+                "PW_Nr": row[0],
+                "Powiazany_Nr": row[1],
+                "CenaNaPW": float(row[2]) if row[2] else 0,
+                "Symbol": row[3],
+                "Nazwa": row[4]
+            })
+
+        # Policz ile PZ ma powiązane FZ (przez ob_DokHanId)
+        sql_cursor.execute("""
+            SELECT COUNT(DISTINCT pz.dok_Id)
+            FROM dok__Dokument pz
+            INNER JOIN dok_Pozycja pz_poz ON pz.dok_Id = pz_poz.ob_DokMagId
+            WHERE pz.dok_NrPelny LIKE 'PZ%'
+                AND pz_poz.ob_DokHanId IS NOT NULL AND pz_poz.ob_DokHanId > 0
+        """)
+        pz_with_fz = sql_cursor.fetchone()[0]
+
+        # Policz ile PW ma dokumenty powiązane
+        sql_cursor.execute("""
+            SELECT COUNT(*) FROM dok__Dokument
+            WHERE dok_NrPelny LIKE 'PW%'
+                AND dok_DoDokId IS NOT NULL AND dok_DoDokId > 0
+        """)
+        pw_with_link = sql_cursor.fetchone()[0]
+
+        sql_connection.close()
+
+        return {
+            "success": True,
+            "pz_fz_links_sample": pz_fz_links,
+            "pw_links_sample": pw_links,
+            "pz_with_fz_count": pz_with_fz,
+            "pw_with_link_count": pw_with_link
+        }
+
+    except Exception as e:
+        import traceback
+        return {
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+
+@app.get("/api/warehouse-stocks")
+async def get_warehouse_stocks(mag_ids: Optional[str] = "1,7,9"):
+    """
+    Pobiera stany magazynowe z podziałem na magazyny bezpośrednio z SQL Server.
+
+    Parametry:
+    - mag_ids: ID magazynów rozdzielone przecinkami (domyślnie: 1,7,9)
+
+    Zwraca produkty z informacją o stanie w każdym magazynie.
+    """
+    try:
+        # Parsuj ID magazynów
+        mag_id_list = [int(x.strip()) for x in mag_ids.split(',') if x.strip()]
+        if not mag_id_list:
+            mag_id_list = [1, 7, 9]
+
+        mag_placeholders = ','.join(str(m) for m in mag_id_list)
+
+        server = os.getenv('SQL_SERVER', r'10.101.101.5\INSERTGT')
+        database = os.getenv('SQL_DATABASE', 'Sporting_Leszno')
+        username = os.getenv('SQL_USERNAME', 'zestawienia2')
+        password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
+
+        sql_connection = pyodbc.connect(
+            'DRIVER={ODBC Driver 18 for SQL Server};'
+            f'SERVER={server};'
+            f'DATABASE={database};'
+            f'UID={username};'
+            f'PWD={password};'
+            'TrustServerCertificate=yes;'
+            'Connection Timeout=30;'
+        )
+        sql_cursor = sql_connection.cursor()
+
+        # Pobierz stany per magazyn z SQL Server
+        # Pobieramy ceny zakupu z lokalnej bazy SQLite, bo SQL Server może nie mieć tc_CenaMag
+        query = f"""
+        SELECT
+            tw.tw_Symbol AS Symbol,
+            tw.tw_Nazwa AS Nazwa,
+            tw.tw_Pole2 AS Marka,
+            tw.tw_pole1 AS Rozmiar,
+            tw.tw_pole8 AS Rodzaj,
+            st.st_MagId AS MagId,
+            st.st_Stan AS Stan,
+            tc.tc_CenaNetto1 AS DetalicznaNetto,
+            tc.tc_CenaBrutto1 AS DetalicznaBrutto
+        FROM tw_Stan st
+        INNER JOIN tw__Towar tw ON st.st_TowId = tw.tw_Id
+        LEFT JOIN tw_Cena tc ON st.st_TowId = tc.tc_IdTowar
+        WHERE st.st_Stan > 0
+            AND st.st_MagId IN ({mag_placeholders})
+        ORDER BY tw.tw_Symbol, st.st_MagId
+        """
+
+        sql_cursor.execute(query)
+        rows = sql_cursor.fetchall()
+        sql_connection.close()
+
+        # Pobierz ceny zakupu z lokalnej bazy SQLite
+        conn_sqlite = get_db_connection()
+        cursor_sqlite = conn_sqlite.cursor()
+        cursor_sqlite.execute("SELECT Symbol, CenaZakupuNetto FROM products WHERE CenaZakupuNetto > 0")
+        purchase_prices = {row[0]: row[1] for row in cursor_sqlite.fetchall()}
+        conn_sqlite.close()
+
+        # Grupuj dane per produkt, zachowując stany per magazyn
+        products_dict = {}
+        for row in rows:
+            symbol = row[0]
+            mag_id = row[5]
+            stan = float(row[6] or 0)
+
+            if symbol not in products_dict:
+                products_dict[symbol] = {
+                    'Symbol': symbol,
+                    'Nazwa': row[1],
+                    'Marka': row[2],
+                    'Rozmiar': row[3],
+                    'Rodzaj': row[4],
+                    'DetalicznaNetto': float(row[7]) if row[7] else 0,
+                    'DetalicznaBrutto': float(row[8]) if row[8] else 0,
+                    'CenaZakupuNetto': purchase_prices.get(symbol, 0),
+                    'StanMag1': 0,  # GLS
+                    'StanMag2': 0,  # GLS DEPOZYT
+                    'StanMag7': 0,  # JEANS
+                    'StanMag9': 0,  # INNE
+                    'StanTotal': 0
+                }
+
+            # Zapisz stan dla danego magazynu
+            products_dict[symbol][f'StanMag{mag_id}'] = stan
+            products_dict[symbol]['StanTotal'] += stan
+
+        # Konwertuj do listy
+        products = list(products_dict.values())
+
+        # Oblicz sumy per magazyn
+        totals = {
+            'count': len(products),
+            'mag1_count': sum(1 for p in products if p['StanMag1'] > 0),
+            'mag2_count': sum(1 for p in products if p['StanMag2'] > 0),
+            'mag7_count': sum(1 for p in products if p['StanMag7'] > 0),
+            'mag9_count': sum(1 for p in products if p['StanMag9'] > 0),
+            'mag1_stock': sum(p['StanMag1'] for p in products),
+            'mag2_stock': sum(p['StanMag2'] for p in products),
+            'mag7_stock': sum(p['StanMag7'] for p in products),
+            'mag9_stock': sum(p['StanMag9'] for p in products),
+            'mag1_value': sum(p['StanMag1'] * p['CenaZakupuNetto'] for p in products),
+            'mag2_value': sum(p['StanMag2'] * p['CenaZakupuNetto'] for p in products),
+            'mag7_value': sum(p['StanMag7'] * p['CenaZakupuNetto'] for p in products),
+            'mag9_value': sum(p['StanMag9'] * p['CenaZakupuNetto'] for p in products),
+            'total_stock': sum(p['StanTotal'] for p in products),
+            'total_value': sum(p['StanTotal'] * p['CenaZakupuNetto'] for p in products),
+            'total_value_sales': sum(p['StanTotal'] * p['DetalicznaBrutto'] for p in products)
+        }
+
+        return {
+            "success": True,
+            "products": products,
+            "totals": totals,
+            "mag_ids": mag_id_list
+        }
+
+    except Exception as e:
+        import traceback
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd podczas pobierania stanów magazynowych: {str(e)}"
+        )
 
 
 if __name__ == "__main__":

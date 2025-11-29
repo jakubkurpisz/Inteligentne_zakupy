@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react'
-import { Package, Search, Filter, Download, TrendingUp, AlertCircle, Warehouse } from 'lucide-react'
+import React, { useState, useEffect, useMemo } from 'react'
+import { Package, Search, Filter, Download, TrendingUp, AlertCircle, Warehouse, ChevronDown, ChevronUp } from 'lucide-react'
 import { BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import { API_BASE_URL } from '../config/api'
 
@@ -13,6 +13,10 @@ function StanyMagazynowe() {
   const [stats, setStats] = useState(null);
   const [categoryData, setCategoryData] = useState([]);
   const [selectedMagazyny, setSelectedMagazyny] = useState(['1', '7', '9']);
+  const [sortConfig, setSortConfig] = useState({ key: 'Stan', direction: 'desc' });
+  const [seasonalityData, setSeasonalityData] = useState({});
+  const [seasonalityLoading, setSeasonalityLoading] = useState(true);
+  const [warehouseTotals, setWarehouseTotals] = useState(null);
 
   // Mapowanie magazynów
   const magazyny = {
@@ -23,23 +27,43 @@ function StanyMagazynowe() {
   };
 
   useEffect(() => {
-    fetchProducts();
+    fetchWarehouseStocks();
     fetchStats();
+    fetchSeasonality();
   }, []);
 
   useEffect(() => {
-    // Filtrowanie produktów na podstawie wyszukiwania
+    // Filtrowanie produktów na podstawie wyszukiwania i wybranych magazynów
+    let filtered = products;
+
+    // Najpierw filtruj po magazynach - produkt musi mieć stan > 0 w co najmniej jednym wybranym magazynie
+    filtered = filtered.filter(product => {
+      const hasStockInSelected = selectedMagazyny.some(magId => {
+        const stanKey = `StanMag${magId}`;
+        return (product[stanKey] || 0) > 0;
+      });
+      return hasStockInSelected;
+    });
+
+    // Następnie filtruj po wyszukiwaniu
     if (searchTerm) {
-      const filtered = products.filter(product =>
+      filtered = filtered.filter(product =>
         product.Nazwa?.toLowerCase().includes(searchTerm.toLowerCase()) ||
         product.Symbol?.toLowerCase().includes(searchTerm.toLowerCase()) ||
         product.Marka?.toLowerCase().includes(searchTerm.toLowerCase())
       );
-      setFilteredProducts(filtered);
-    } else {
-      setFilteredProducts(products);
     }
-  }, [searchTerm, products]);
+
+    // Oblicz stan tylko dla wybranych magazynów
+    filtered = filtered.map(product => {
+      const stanFiltered = selectedMagazyny.reduce((sum, magId) => {
+        return sum + (product[`StanMag${magId}`] || 0);
+      }, 0);
+      return { ...product, Stan: stanFiltered };
+    });
+
+    setFilteredProducts(filtered);
+  }, [searchTerm, products, selectedMagazyny]);
 
   const toggleMagazyn = (magId) => {
     setSelectedMagazyny(prev => {
@@ -53,19 +77,27 @@ function StanyMagazynowe() {
     });
   };
 
-  const fetchProducts = async () => {
+  const fetchWarehouseStocks = async () => {
     try {
-      const response = await fetch(`${API_URL}/api/sales-data`);
+      const response = await fetch(`${API_URL}/api/warehouse-stocks?mag_ids=1,2,7,9`);
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
       const data = await response.json();
-      setProducts(data);
-      setFilteredProducts(data);
-      processProductData(data);
+      if (data.success) {
+        // Dodaj pole Stan (total) dla kompatybilności
+        const productsWithStan = data.products.map(p => ({
+          ...p,
+          Stan: p.StanTotal
+        }));
+        setProducts(productsWithStan);
+        setFilteredProducts(productsWithStan);
+        setWarehouseTotals(data.totals);
+        processProductData(productsWithStan);
+      }
     } catch (error) {
       setError(error);
-      console.error("Błąd podczas pobierania danych produktów:", error);
+      console.error("Błąd podczas pobierania stanów magazynowych:", error);
     } finally {
       setLoading(false);
     }
@@ -82,6 +114,53 @@ function StanyMagazynowe() {
     } catch (error) {
       console.error("Błąd podczas pobierania statystyk:", error);
     }
+  };
+
+  const fetchSeasonality = async () => {
+    try {
+      setSeasonalityLoading(true);
+      const response = await fetch(`${API_URL}/api/product-seasonality`);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const data = await response.json();
+      if (data.success) {
+        setSeasonalityData(data.data);
+      }
+    } catch (error) {
+      console.error("Błąd podczas pobierania danych sezonowości:", error);
+    } finally {
+      setSeasonalityLoading(false);
+    }
+  };
+
+  // Funkcja do wyświetlania kategorii sezonowości
+  const getSeasonalityBadge = (symbol) => {
+    const data = seasonalityData[symbol];
+    if (!data) {
+      return <span className="text-xs text-gray-400">-</span>;
+    }
+
+    const badges = {
+      'STABILNY': { bg: 'bg-green-100', text: 'text-green-800', border: 'border-green-300', label: 'Stabilny', icon: '●' },
+      'ZMIENNY': { bg: 'bg-yellow-100', text: 'text-yellow-800', border: 'border-yellow-300', label: 'Zmienny', icon: '◐' },
+      'SEZONOWY': { bg: 'bg-red-100', text: 'text-red-800', border: 'border-red-300', label: 'Sezonowy', icon: '◑' },
+      'BRAK_DANYCH': { bg: 'bg-gray-100', text: 'text-gray-600', border: 'border-gray-300', label: 'Brak', icon: '○' },
+      'BRAK_SPRZEDAZY': { bg: 'bg-gray-100', text: 'text-gray-500', border: 'border-gray-300', label: 'Brak sprz.', icon: '○' }
+    };
+
+    const badge = badges[data.category] || badges['BRAK_DANYCH'];
+    const cvText = data.cv !== null ? `CV: ${(data.cv * 100).toFixed(0)}%` : '';
+
+    return (
+      <span
+        className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${badge.bg} ${badge.text} ${badge.border}`}
+        title={`${badge.label}\n${cvText}\nŚr. mies.: ${data.avg} szt.\nOdch. std.: ${data.std}`}
+      >
+        <span className="mr-1">{badge.icon}</span>
+        {badge.label}
+      </span>
+    );
   };
 
   const processProductData = (data) => {
@@ -133,8 +212,11 @@ function StanyMagazynowe() {
   };
 
   const calculateTotalValue = () => {
+    // Wartość magazynu liczona po cenach zakupu netto
     return filteredProducts.reduce((sum, product) => {
-      return sum + (parseFloat(product.DetalicznaNetto || 0) * parseFloat(product.Stan || 0));
+      const cenaZakupu = parseFloat(product.CenaZakupuNetto || 0);
+      const stan = parseFloat(product.Stan || 0);
+      return sum + (cenaZakupu * stan);
     }, 0);
   };
 
@@ -143,6 +225,59 @@ function StanyMagazynowe() {
       return sum + parseFloat(product.Stan || 0);
     }, 0);
   };
+
+  // Oblicz wartość magazynu w cenach sprzedaży brutto
+  const calculateTotalValueSales = () => {
+    return filteredProducts.reduce((sum, product) => {
+      const cenaSprzedazy = parseFloat(product.DetalicznaBrutto || 0);
+      const stan = parseFloat(product.Stan || 0);
+      return sum + (cenaSprzedazy * stan);
+    }, 0);
+  };
+
+  // Funkcja sortowania
+  const handleSort = (key) => {
+    setSortConfig(prev => ({
+      key,
+      direction: prev.key === key && prev.direction === 'desc' ? 'asc' : 'desc'
+    }));
+  };
+
+  // Ikona sortowania
+  const SortIcon = ({ columnKey }) => {
+    if (sortConfig.key !== columnKey) return null;
+    return sortConfig.direction === 'desc' ?
+      <ChevronDown className="w-4 h-4 inline ml-1" /> :
+      <ChevronUp className="w-4 h-4 inline ml-1" />;
+  };
+
+  // Sortowane produkty
+  const sortedProducts = useMemo(() => {
+    return [...filteredProducts].sort((a, b) => {
+      let aVal, bVal;
+
+      // Dla wartości zakupu i sprzedaży obliczamy dynamicznie
+      if (sortConfig.key === 'WartoscZakupu') {
+        aVal = parseFloat(a.CenaZakupuNetto || 0) * parseFloat(a.Stan || 0);
+        bVal = parseFloat(b.CenaZakupuNetto || 0) * parseFloat(b.Stan || 0);
+      } else if (sortConfig.key === 'WartoscSprzedazy') {
+        aVal = parseFloat(a.DetalicznaBrutto || 0) * parseFloat(a.Stan || 0);
+        bVal = parseFloat(b.DetalicznaBrutto || 0) * parseFloat(b.Stan || 0);
+      } else {
+        aVal = a[sortConfig.key] || 0;
+        bVal = b[sortConfig.key] || 0;
+      }
+
+      // Konwertuj na liczby jeśli to możliwe
+      if (typeof aVal === 'string') aVal = parseFloat(aVal) || aVal;
+      if (typeof bVal === 'string') bVal = parseFloat(bVal) || bVal;
+
+      if (sortConfig.direction === 'asc') {
+        return aVal > bVal ? 1 : -1;
+      }
+      return aVal < bVal ? 1 : -1;
+    });
+  }, [filteredProducts, sortConfig]);
 
   if (loading) {
     return <div className="text-center text-lg font-medium">Ładowanie danych...</div>;
@@ -173,61 +308,59 @@ function StanyMagazynowe() {
       </div>
 
       {/* Statystyki */}
-      {stats && (
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-          <div className="card bg-blue-50 border-2 border-blue-200">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm text-gray-600 font-medium">Całkowita liczba produktów</p>
-                <p className="text-3xl font-bold text-gray-900 mt-2">{formatNumber(stats.total_products, 0)}</p>
-                <div className="flex items-center mt-2 text-blue-600">
-                  <Package className="w-4 h-4 mr-1" />
-                  <span className="text-sm font-medium">W bazie danych</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="card bg-green-50 border-2 border-green-200">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm text-gray-600 font-medium">Wartość magazynu</p>
-                <p className="text-3xl font-bold text-gray-900 mt-2">{formatNumber(calculateTotalValue())} zł</p>
-                <div className="flex items-center mt-2 text-green-600">
-                  <TrendingUp className="w-4 h-4 mr-1" />
-                  <span className="text-sm font-medium">Netto</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="card bg-purple-50 border-2 border-purple-200">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm text-gray-600 font-medium">Nowe produkty</p>
-                <p className="text-3xl font-bold text-gray-900 mt-2">{formatNumber(stats.new_products, 0)}</p>
-                <div className="flex items-center mt-2 text-purple-600">
-                  <AlertCircle className="w-4 h-4 mr-1" />
-                  <span className="text-sm font-medium">Ostatni cykl</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="card bg-orange-50 border-2 border-orange-200">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm text-gray-600 font-medium">Całkowity stan</p>
-                <p className="text-3xl font-bold text-gray-900 mt-2">{formatNumber(calculateTotalStock(), 0)} szt.</p>
-                <div className="flex items-center mt-2 text-orange-600">
-                  <Package className="w-4 h-4 mr-1" />
-                  <span className="text-sm font-medium">Wszystkie magazyny</span>
-                </div>
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+        <div className="card bg-blue-50 border-2 border-blue-200">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-600 font-medium">Liczba produktów</p>
+              <p className="text-3xl font-bold text-gray-900 mt-2">{formatNumber(filteredProducts.length, 0)}</p>
+              <div className="flex items-center mt-2 text-blue-600">
+                <Package className="w-4 h-4 mr-1" />
+                <span className="text-sm font-medium">W wybranych magazynach</span>
               </div>
             </div>
           </div>
         </div>
-      )}
+
+        <div className="card bg-green-50 border-2 border-green-200">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-600 font-medium">Wartość magazynu</p>
+              <p className="text-3xl font-bold text-gray-900 mt-2">{formatNumber(calculateTotalValue())} zł</p>
+              <div className="flex items-center mt-2 text-green-600">
+                <TrendingUp className="w-4 h-4 mr-1" />
+                <span className="text-sm font-medium">Cena zakupu netto</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="card bg-purple-50 border-2 border-purple-200">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-600 font-medium">Wartość sprzedaży</p>
+              <p className="text-3xl font-bold text-gray-900 mt-2">{formatNumber(calculateTotalValueSales())} zł</p>
+              <div className="flex items-center mt-2 text-purple-600">
+                <TrendingUp className="w-4 h-4 mr-1" />
+                <span className="text-sm font-medium">Cena detaliczna brutto</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="card bg-orange-50 border-2 border-orange-200">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-600 font-medium">Całkowity stan</p>
+              <p className="text-3xl font-bold text-gray-900 mt-2">{formatNumber(calculateTotalStock(), 0)} szt.</p>
+              <div className="flex items-center mt-2 text-orange-600">
+                <Package className="w-4 h-4 mr-1" />
+                <span className="text-sm font-medium">Wybrane magazyny</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
 
       {/* Filtry magazynowe */}
       <div className="card">
@@ -255,8 +388,8 @@ function StanyMagazynowe() {
             <p className="text-xs text-gray-500">
               Wybrane magazyny: {selectedMagazyny.map(id => magazyny[id]).join(', ')}
             </p>
-            <p className="text-xs text-amber-600 italic">
-              Uwaga: Filtrowanie magazynów dostępne po integracji z SQL Server
+            <p className="text-xs text-green-600">
+              Kafelki i tabela pokazują dane tylko dla wybranych magazynów
             </p>
           </div>
         </div>
@@ -324,45 +457,119 @@ function StanyMagazynowe() {
 
       {/* Tabela produktów */}
       <div className="card">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Lista Produktów</h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-gray-900">Lista Produktów</h2>
+          <span className="text-sm text-gray-500">
+            Sortowanie: {sortConfig.key === 'WartoscZakupu' ? 'Wartość zakupu' :
+                        sortConfig.key === 'WartoscSprzedazy' ? 'Wartość sprzedaży' :
+                        sortConfig.key} ({sortConfig.direction === 'desc' ? 'malejąco' : 'rosnąco'})
+          </span>
+        </div>
         <div className="overflow-x-auto">
           <table className="min-w-full bg-white">
             <thead className="bg-gray-50">
               <tr>
-                <th className="py-3 px-4 border-b text-left text-sm font-semibold text-gray-600">Symbol</th>
-                <th className="py-3 px-4 border-b text-left text-sm font-semibold text-gray-600">Nazwa</th>
-                <th className="py-3 px-4 border-b text-left text-sm font-semibold text-gray-600">Marka</th>
-                <th className="py-3 px-4 border-b text-left text-sm font-semibold text-gray-600">Grupa</th>
-                <th className="py-3 px-4 border-b text-left text-sm font-semibold text-gray-600">Stan</th>
-                <th className="py-3 px-4 border-b text-left text-sm font-semibold text-gray-600">Cena Netto</th>
-                <th className="py-3 px-4 border-b text-left text-sm font-semibold text-gray-600">Cena Brutto</th>
-                <th className="py-3 px-4 border-b text-left text-sm font-semibold text-gray-600">Wartość</th>
-                <th className="py-3 px-4 border-b text-left text-sm font-semibold text-gray-600">Kategoria</th>
+                <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600">Symbol</th>
+                <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600">Nazwa</th>
+                <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600">Marka</th>
+                <th
+                  className="py-3 px-3 border-b text-right text-sm font-semibold text-gray-600 cursor-pointer hover:bg-gray-100"
+                  onClick={() => handleSort('Stan')}
+                >
+                  Stan <SortIcon columnKey="Stan" />
+                </th>
+                <th
+                  className="py-3 px-3 border-b text-right text-sm font-semibold text-blue-600 cursor-pointer hover:bg-gray-100"
+                  onClick={() => handleSort('CenaZakupuNetto')}
+                >
+                  Zakup Netto <SortIcon columnKey="CenaZakupuNetto" />
+                </th>
+                <th
+                  className="py-3 px-3 border-b text-right text-sm font-semibold text-green-600 cursor-pointer hover:bg-gray-100"
+                  onClick={() => handleSort('DetalicznaBrutto')}
+                >
+                  Sprzedaż Brutto <SortIcon columnKey="DetalicznaBrutto" />
+                </th>
+                <th
+                  className="py-3 px-3 border-b text-right text-sm font-semibold text-blue-800 cursor-pointer hover:bg-gray-100"
+                  onClick={() => handleSort('WartoscZakupu')}
+                >
+                  Wart. zakupu <SortIcon columnKey="WartoscZakupu" />
+                </th>
+                <th
+                  className="py-3 px-3 border-b text-right text-sm font-semibold text-green-800 cursor-pointer hover:bg-gray-100"
+                  onClick={() => handleSort('WartoscSprzedazy')}
+                >
+                  Wart. sprzedaży <SortIcon columnKey="WartoscSprzedazy" />
+                </th>
+                <th className="py-3 px-3 border-b text-center text-sm font-semibold text-purple-700" title="Sezonowość produktu na podstawie CV (Współczynnik zmienności) z ostatnich 12 miesięcy. STABILNY: CV<20%, ZMIENNY: 20-50%, SEZONOWY: >50%">
+                  Sezonowość
+                </th>
+                <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600">Kategoria</th>
               </tr>
             </thead>
             <tbody>
-              {filteredProducts.slice(0, 50).map((product, index) => (
-                <tr key={index} className="hover:bg-gray-50">
-                  <td className="py-2 px-4 border-b text-sm text-gray-700">{product.Symbol}</td>
-                  <td className="py-2 px-4 border-b text-sm text-gray-700">{product.Nazwa}</td>
-                  <td className="py-2 px-4 border-b text-sm text-gray-700">{product.Marka}</td>
-                  <td className="py-2 px-4 border-b text-sm text-gray-700">{product.Grupa || '-'}</td>
-                  <td className="py-2 px-4 border-b text-sm text-gray-700">{formatNumber(parseFloat(product.Stan || 0), 0)}</td>
-                  <td className="py-2 px-4 border-b text-sm text-gray-700">{formatNumber(parseFloat(product.DetalicznaNetto || 0))} zł</td>
-                  <td className="py-2 px-4 border-b text-sm text-gray-700">{formatNumber(parseFloat(product.DetalicznaBrutto || 0))} zł</td>
-                  <td className="py-2 px-4 border-b text-sm text-gray-700 font-semibold">
-                    {formatNumber(parseFloat(product.DetalicznaNetto || 0) * parseFloat(product.Stan || 0))} zł
-                  </td>
-                  <td className="py-2 px-4 border-b text-sm text-gray-700">{product.Rodzaj || 'Nieznana'}</td>
-                </tr>
-              ))}
+              {sortedProducts.slice(0, 100).map((product, index) => {
+                const cenaZakupuNetto = parseFloat(product.CenaZakupuNetto || 0);
+                const cenaSprzedazyBrutto = parseFloat(product.DetalicznaBrutto || 0);
+                const stan = parseFloat(product.Stan || 0);
+                const wartoscZakupu = cenaZakupuNetto * stan;
+                const wartoscSprzedazy = cenaSprzedazyBrutto * stan;
+
+                return (
+                  <tr key={index} className="hover:bg-gray-50">
+                    <td className="py-2 px-3 border-b text-sm text-gray-700 font-mono">{product.Symbol}</td>
+                    <td className="py-2 px-3 border-b text-sm text-gray-700 max-w-xs truncate" title={product.Nazwa}>{product.Nazwa}</td>
+                    <td className="py-2 px-3 border-b text-sm text-gray-700">{product.Marka}</td>
+                    <td className="py-2 px-3 border-b text-sm text-gray-700 text-right">{formatNumber(stan, 0)}</td>
+                    <td className="py-2 px-3 border-b text-sm text-blue-700 text-right font-medium">
+                      {cenaZakupuNetto > 0 ? `${formatNumber(cenaZakupuNetto)} zł` : '-'}
+                    </td>
+                    <td className="py-2 px-3 border-b text-sm text-green-700 text-right font-medium">
+                      {formatNumber(cenaSprzedazyBrutto)} zł
+                    </td>
+                    <td className="py-2 px-3 border-b text-sm text-blue-800 text-right font-semibold">
+                      {cenaZakupuNetto > 0 ? `${formatNumber(wartoscZakupu)} zł` : '-'}
+                    </td>
+                    <td className="py-2 px-3 border-b text-sm text-green-800 text-right font-semibold">
+                      {formatNumber(wartoscSprzedazy)} zł
+                    </td>
+                    <td className="py-2 px-3 border-b text-sm text-center">
+                      {getSeasonalityBadge(product.Symbol)}
+                    </td>
+                    <td className="py-2 px-3 border-b text-sm text-gray-700">{product.Rodzaj || 'Nieznana'}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
-          {filteredProducts.length > 50 && (
+          {sortedProducts.length > 100 && (
             <div className="p-4 text-center text-sm text-gray-500">
-              Wyświetlono 50 z {filteredProducts.length} produktów. Użyj wyszukiwarki aby zawęzić wyniki.
+              Wyświetlono 100 z {sortedProducts.length} produktów. Użyj wyszukiwarki aby zawęzić wyniki.
             </div>
           )}
+        </div>
+
+        {/* Podsumowanie wartości */}
+        <div className="border-t pt-4 mt-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
+            <div className="bg-gray-50 rounded-lg p-3">
+              <p className="text-sm text-gray-600">Liczba produktów</p>
+              <p className="text-xl font-bold text-gray-700">{formatNumber(filteredProducts.length, 0)}</p>
+            </div>
+            <div className="bg-orange-50 rounded-lg p-3">
+              <p className="text-sm text-gray-600">Suma stanów</p>
+              <p className="text-xl font-bold text-orange-700">{formatNumber(calculateTotalStock(), 0)} szt.</p>
+            </div>
+            <div className="bg-blue-50 rounded-lg p-3">
+              <p className="text-sm text-gray-600">Wartość zakupu (netto)</p>
+              <p className="text-xl font-bold text-blue-700">{formatNumber(calculateTotalValue())} zł</p>
+            </div>
+            <div className="bg-green-50 rounded-lg p-3">
+              <p className="text-sm text-gray-600">Wartość sprzedaży (brutto)</p>
+              <p className="text-xl font-bold text-green-700">{formatNumber(calculateTotalValueSales())} zł</p>
+            </div>
+          </div>
         </div>
       </div>
     </div>

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Calendar, TrendingUp, Download, Filter, RefreshCw, Warehouse, Package, ChevronDown, ChevronUp } from 'lucide-react'
+import { Calendar, TrendingUp, Filter, RefreshCw, Warehouse, Package, ChevronDown, ChevronUp, HelpCircle, X } from 'lucide-react'
 import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import { API_BASE_URL } from '../config/api'
 
@@ -8,7 +8,7 @@ function SalesAnalysisNew() {
   const [salesData, setSalesData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [period, setPeriod] = useState('daily');
+  const [period, setPeriod] = useState('monthly');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [selectedMagazyny, setSelectedMagazyny] = useState(['1', '7', '9']);
@@ -32,6 +32,9 @@ function SalesAnalysisNew() {
   const [trendSymbol, setTrendSymbol] = useState('');
   const [trendModel, setTrendModel] = useState('');
 
+  // Stan dla okna pomocy
+  const [showHelp, setShowHelp] = useState(false);
+
   // Mapowanie magazynów
   const magazyny = {
     '1': 'GLS',
@@ -41,10 +44,11 @@ function SalesAnalysisNew() {
   };
 
   useEffect(() => {
-    // Ustaw domyślny zakres dat - DZIENNY = DZISIAJ (nie ostatnie 30 dni)
+    // Ustaw domyślny zakres dat - MIESIĘCZNY = od 1-go dnia bieżącego miesiąca do dziś
     const today = new Date();
+    const firstDayOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
     setEndDate(today.toISOString().split('T')[0]);
-    setStartDate(today.toISOString().split('T')[0]);
+    setStartDate(firstDayOfMonth.toISOString().split('T')[0]);
   }, []);
 
   useEffect(() => {
@@ -57,10 +61,8 @@ function SalesAnalysisNew() {
     setLoading(true);
     try {
       const magIds = selectedMagazyny.join(',');
-      // Wybierz grupowanie w zależności od okresu
-      let groupBy = 'day';
-      if (period === 'monthly' || period === 'yearly') groupBy = 'month';
-      else if (period === 'weekly') groupBy = 'week';
+      // Roczny - grupuj miesięcznie, pozostałe - dziennie
+      const groupBy = period === 'yearly' ? 'month' : 'day';
 
       // Używamy sales-items-trend (live z SQL Server) zamiast sales-history (SQLite)
       const url = `${API_URL}/api/sales-items-trend?start_date=${startDate}&end_date=${endDate}&mag_ids=${magIds}&group_by=${groupBy}`;
@@ -131,10 +133,8 @@ function SalesAnalysisNew() {
     setTrendLoading(true);
     try {
       const magIds = selectedMagazyny.join(',');
-      // Wybierz grupowanie w zależności od okresu
-      let groupBy = 'day';
-      if (period === 'monthly' || period === 'yearly') groupBy = 'month';
-      else if (period === 'weekly') groupBy = 'week';
+      // Roczny - grupuj miesięcznie, pozostałe - dziennie
+      const groupBy = period === 'yearly' ? 'month' : 'day';
 
       let url = `${API_URL}/api/sales-items-trend?start_date=${startDate}&end_date=${endDate}&mag_ids=${magIds}&group_by=${groupBy}`;
 
@@ -214,16 +214,18 @@ function SalesAnalysisNew() {
 
     // Automatyczne ustawienie zakresu dat w zależności od okresu
     const today = new Date();
-    const start = new Date(today);
+    let start = new Date(today);
 
     switch(newPeriod) {
       case 'daily':
         // DZIENNY = DZISIAJ
-        start.setDate(today.getDate());
         break;
       case 'weekly':
-        // TYGODNIOWY = ostatnie 7 dni
-        start.setDate(today.getDate() - 7);
+        // TYGODNIOWY = aktualny tydzień (od poniedziałku do dziś)
+        const dayOfWeek = today.getDay(); // 0 = niedziela, 1 = poniedziałek, ...
+        const daysFromMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1; // ile dni od poniedziałku
+        start = new Date(today);
+        start.setDate(today.getDate() - daysFromMonday);
         break;
       case 'monthly':
         // MIESIĘCZNY = cały bieżący miesiąc (od 1-go dnia miesiąca do dziś)
@@ -235,7 +237,7 @@ function SalesAnalysisNew() {
         start.setDate(1);
         break;
       default:
-        start.setDate(today.getDate());
+        break;
     }
 
     setStartDate(start.toISOString().split('T')[0]);
@@ -341,10 +343,6 @@ function SalesAnalysisNew() {
           >
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
             <span>Odśwież</span>
-          </button>
-          <button className="btn-primary flex items-center space-x-2">
-            <Download className="w-4 h-4" />
-            <span>Eksportuj raport</span>
           </button>
         </div>
       </div>
@@ -928,6 +926,110 @@ function SalesAnalysisNew() {
           </>
         )}
       </div>
+
+      {/* Przycisk pomocy w prawym dolnym rogu */}
+      <button
+        onClick={() => setShowHelp(true)}
+        className="fixed bottom-6 right-6 w-14 h-14 bg-primary-600 hover:bg-primary-700 text-white rounded-full shadow-lg flex items-center justify-center transition-all hover:scale-110 z-40"
+        title="Pomoc - informacje o widoku"
+      >
+        <HelpCircle className="w-7 h-7" />
+      </button>
+
+      {/* Modal pomocy */}
+      {showHelp && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 bg-white border-b px-6 py-4 flex items-center justify-between rounded-t-2xl">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 bg-primary-100 rounded-lg flex items-center justify-center">
+                  <HelpCircle className="w-6 h-6 text-primary-600" />
+                </div>
+                <h2 className="text-xl font-bold text-gray-900">Analiza Sprzedaży - Pomoc</h2>
+              </div>
+              <button
+                onClick={() => setShowHelp(false)}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-6">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">Do czego sluzy ten widok?</h3>
+                <p className="text-gray-600">
+                  Widok Analiza Sprzedazy umozliwia kompleksowa analize historii transakcji i trendow sprzedazowych.
+                  Pozwala na monitorowanie wynikow sprzedazy w roznych okresach czasowych oraz filtrowanie danych
+                  wedlug magazynow, rodzajow produktow, przeznaczeń i marek.
+                </p>
+              </div>
+
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-3">Glowne funkcjonalnosci:</h3>
+                <div className="space-y-3">
+                  <div className="flex items-start space-x-3 p-3 bg-blue-50 rounded-lg">
+                    <Calendar className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Wybor okresu analizy</p>
+                      <p className="text-sm text-gray-600">Dzienny, tygodniowy, miesieczny lub roczny zakres danych z mozliwoscia recznego ustawienia dat.</p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-start space-x-3 p-3 bg-green-50 rounded-lg">
+                    <Warehouse className="w-5 h-5 text-green-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Filtrowanie po magazynach</p>
+                      <p className="text-sm text-gray-600">Mozliwosc wyboru jednego lub wielu magazynow (GLS, JEANS, INNE, GLS DEPOZYT).</p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-start space-x-3 p-3 bg-purple-50 rounded-lg">
+                    <TrendingUp className="w-5 h-5 text-purple-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Wykresy i trendy</p>
+                      <p className="text-sm text-gray-600">Interaktywne wykresy pokazujace trend sprzedazy, wartosc brutto, ilosc sprzedana i liczbe transakcji.</p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-start space-x-3 p-3 bg-orange-50 rounded-lg">
+                    <Filter className="w-5 h-5 text-orange-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Filtry produktow</p>
+                      <p className="text-sm text-gray-600">Filtrowanie listy sprzedanych towarow wedlug rodzaju, przeznaczenia i marki.</p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-start space-x-3 p-3 bg-pink-50 rounded-lg">
+                    <Package className="w-5 h-5 text-pink-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Lista sprzedanych towarow</p>
+                      <p className="text-sm text-gray-600">Szczegolowa tabela z produktami, ich symbolami, nazwami, markami oraz wartosciami sprzedazy. Mozliwosc sortowania po ilosci i wartosci.</p>
+                    </div>
+                  </div>
+
+                </div>
+              </div>
+
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h4 className="font-medium text-gray-900 mb-2">Wskazowka</h4>
+                <p className="text-sm text-gray-600">
+                  Aby zobaczyc trend konkretnego produktu, uzyj filtrow "Symbol" i "Model" w sekcji wykresu trendu sprzedazy produktow.
+                </p>
+              </div>
+            </div>
+
+            <div className="sticky bottom-0 bg-gray-50 px-6 py-4 border-t rounded-b-2xl">
+              <button
+                onClick={() => setShowHelp(false)}
+                className="w-full btn-primary"
+              >
+                Rozumiem
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

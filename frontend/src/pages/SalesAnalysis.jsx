@@ -1,27 +1,48 @@
-import React, { useState, useEffect } from 'react'
-import { Calendar, TrendingUp, Download, Filter } from 'lucide-react'
+import React, { useState, useEffect, useRef } from 'react'
+import { Calendar, TrendingUp, Filter, HelpCircle, X, Package } from 'lucide-react'
 import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts'
 import { API_BASE_URL } from '../config/api'
 
+// Cache helpers
+const CACHE_KEY = 'salesAnalysis_cache';
+const getFromCache = (key, defaultValue) => {
+  try {
+    const cached = localStorage.getItem(CACHE_KEY);
+    if (!cached) return defaultValue;
+    const parsed = JSON.parse(cached);
+    return parsed[key] !== undefined ? parsed[key] : defaultValue;
+  } catch { return defaultValue; }
+};
+const saveAllToCache = (values) => {
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify(values)); } catch {}
+};
+
 function SalesAnalysis() {
   const API_URL = API_BASE_URL;
-  const [salesData, setSalesData] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [salesData, setSalesData] = useState(() => getFromCache('salesData', []));
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  const [monthlyData, setMonthlyData] = useState([]);
-  const [categoryData, setCategoryData] = useState([]);
-  const [groupData, setGroupData] = useState([]);
-  const [dailyTransactionsData, setDailyTransactionsData] = useState([]);
+  const [monthlyData, setMonthlyData] = useState(() => getFromCache('monthlyData', []));
+  const [categoryData, setCategoryData] = useState(() => getFromCache('categoryData', []));
+  const [groupData, setGroupData] = useState(() => getFromCache('groupData', []));
+  const [dailyTransactionsData, setDailyTransactionsData] = useState(() => getFromCache('dailyTransactionsData', []));
 
-  const [salesSummary, setSalesSummary] = useState({
+  const [salesSummary, setSalesSummary] = useState(() => getFromCache('salesSummary', {
     daily: [],
     weekly: [],
     monthly: [],
     yearly: [],
-  });
+  }));
+
+  const hasFetchedRef = useRef(false);
+  const [showHelp, setShowHelp] = useState(false);
 
   useEffect(() => {
+    // Pobierz dane tylko raz przy montowaniu
+    if (hasFetchedRef.current) return;
+    hasFetchedRef.current = true;
+
     const fetchSalesData = async () => {
       try {
         const response = await fetch(`${API_URL}/api/sales-data`);
@@ -30,12 +51,18 @@ function SalesAnalysis() {
         }
         const data = await response.json();
         setSalesData(data);
-        processSalesData(data);
+        const processed = processSalesData(data);
+        // Update cache with processed data
+        saveAllToCache({
+          salesData: data,
+          monthlyData: processed.monthlyData,
+          categoryData: processed.categoryData,
+          groupData: processed.groupData,
+          dailyTransactionsData: processed.dailyTransactionsData
+        });
       } catch (error) {
         setError(error);
         console.error("Błąd podczas pobierania danych sprzedażowych:", error);
-      } finally {
-        setLoading(false);
       }
     };
 
@@ -47,6 +74,9 @@ function SalesAnalysis() {
         }
         const data = await response.json();
         setSalesSummary(data);
+        // Update cache
+        const current = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}');
+        saveAllToCache({ ...current, salesSummary: data });
       } catch (error) {
         console.error("Błąd podczas pobierania podsumowania sprzedaży:", error);
       }
@@ -56,80 +86,83 @@ function SalesAnalysis() {
     fetchSalesSummary();
   }, []);
 
-  const processSalesData = (data) => {
-    // Przetwarzanie danych dla wykresu sprzedaży dziennej (zamiast miesięcznej)
-    const dailySalesMap = data.reduce((acc, item) => {
-      // Pomijamy elementy bez daty sprzedaży
-      if (!item.LastUpdated && !item.DataSprzedazy) return acc;
+  // Stałe kolory dla kategorii (żeby nie zmieniały się przy każdym renderze)
+  const categoryColors = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4', '#84CC16', '#F97316', '#6366F1'];
 
+  const processSalesData = (data) => {
+    // Przetwarzanie danych dla wykresu sprzedaży dziennej
+    const dailySalesMap = data.reduce((acc, item) => {
+      if (!item.LastUpdated && !item.DataSprzedazy) return acc;
       const date = item.LastUpdated ? item.LastUpdated.split('T')[0] : item.DataSprzedazy;
       const nettoValue = parseFloat(item.DetalicznaNetto || 0);
-
       if (!acc[date]) {
         acc[date] = { date: date, sprzedaz: 0 };
       }
       acc[date].sprzedaz += nettoValue * parseFloat(item.Stan || 0);
       return acc;
     }, {});
-        const processedDailySales = Object.values(dailySalesMap).sort((a, b) => new Date(a.date) - new Date(b.date));
-        setMonthlyData(processedDailySales); // Używamy monthlyData do wyświetlania danych dziennych
-    
-        // Przetwarzanie danych dla wykresu kategorii
-        const categorySalesMap = data.reduce((acc, item) => {
-          const category = item.Rodzaj || 'Nieznana';
-          const nettoValue = parseFloat(item.DetalicznaNetto || 0) * parseFloat(item.Stan || 0);
-          if (!acc[category]) {
-            acc[category] = 0;
-          }
-          acc[category] += nettoValue;
-          return acc;
-        }, {});
-    
-        const totalSales = Object.values(categorySalesMap).reduce((sum, value) => sum + value, 0);
-        const processedCategoryData = Object.entries(categorySalesMap).map(([name, value]) => ({
-          name,
-          value: parseFloat(((value / totalSales) * 100).toFixed(2)),
-          color: getRandomColor(), // Funkcja do generowania losowych kolorów
-        }));
-        setCategoryData(processedCategoryData);
+    const processedMonthlyData = Object.values(dailySalesMap).sort((a, b) => new Date(a.date) - new Date(b.date));
+    setMonthlyData(processedMonthlyData);
 
-        // Przetwarzanie danych dla wykresu grup
-        const groupSalesMap = data.reduce((acc, item) => {
-          const group = item.Grupa || 'Brak grupy';
-          const nettoValue = parseFloat(item.DetalicznaNetto || 0) * parseFloat(item.Stan || 0);
-          if (!acc[group]) {
-            acc[group] = 0;
-          }
-          acc[group] += nettoValue;
-          return acc;
-        }, {});
+    // Przetwarzanie danych dla wykresu kategorii
+    const categorySalesMap = data.reduce((acc, item) => {
+      const category = item.Rodzaj || 'Nieznana';
+      const nettoValue = parseFloat(item.DetalicznaNetto || 0) * parseFloat(item.Stan || 0);
+      if (!acc[category]) acc[category] = 0;
+      acc[category] += nettoValue;
+      return acc;
+    }, {});
 
-        const totalGroupSales = Object.values(groupSalesMap).reduce((sum, value) => sum + value, 0);
-        const processedGroupData = Object.entries(groupSalesMap)
-          .map(([name, value]) => ({
-            name,
-            value: parseFloat(((value / totalGroupSales) * 100).toFixed(2)),
-            absoluteValue: value,
-            color: getRandomColor(),
-          }))
-          .sort((a, b) => b.absoluteValue - a.absoluteValue)
-          .slice(0, 10); // Top 10 grup
-        setGroupData(processedGroupData);
-    
-        // Przetwarzanie danych dla rozkładu transakcji w ciągu dnia (teraz dziennego)
-        const dailyTransactionsMap = data.reduce((acc, item) => {
-          if (!item.LastUpdated && !item.DataSprzedazy) return acc;
+    const totalSales = Object.values(categorySalesMap).reduce((sum, value) => sum + value, 0);
+    const processedCategoryData = Object.entries(categorySalesMap).map(([name, value], idx) => ({
+      name,
+      value: parseFloat(((value / totalSales) * 100).toFixed(2)),
+      color: categoryColors[idx % categoryColors.length],
+    }));
+    setCategoryData(processedCategoryData);
 
-          const date = item.LastUpdated ? item.LastUpdated.split('T')[0] : item.DataSprzedazy;
-          const quantity = parseFloat(item.Stan || 0);
-          if (!acc[date]) {
-            acc[date] = { date: date, transakcje: 0 };
-          }
-          acc[date].transakcje += quantity;
-          return acc;
-        }, {});
-    const processedDailyTransactions = Object.values(dailyTransactionsMap).sort((a, b) => new Date(a.date) - new Date(b.date));
-    setDailyTransactionsData(processedDailyTransactions);
+    // Przetwarzanie danych dla wykresu grup
+    const groupSalesMap = data.reduce((acc, item) => {
+      const group = item.Grupa || 'Brak grupy';
+      const nettoValue = parseFloat(item.DetalicznaNetto || 0) * parseFloat(item.Stan || 0);
+      if (!acc[group]) acc[group] = 0;
+      acc[group] += nettoValue;
+      return acc;
+    }, {});
+
+    const totalGroupSales = Object.values(groupSalesMap).reduce((sum, value) => sum + value, 0);
+    const processedGroupData = Object.entries(groupSalesMap)
+      .map(([name, value], idx) => ({
+        name,
+        value: parseFloat(((value / totalGroupSales) * 100).toFixed(2)),
+        absoluteValue: value,
+        color: categoryColors[idx % categoryColors.length],
+      }))
+      .sort((a, b) => b.absoluteValue - a.absoluteValue)
+      .slice(0, 10);
+    setGroupData(processedGroupData);
+
+    // Przetwarzanie danych dla rozkładu transakcji
+    const dailyTransactionsMap = data.reduce((acc, item) => {
+      if (!item.LastUpdated && !item.DataSprzedazy) return acc;
+      const date = item.LastUpdated ? item.LastUpdated.split('T')[0] : item.DataSprzedazy;
+      const quantity = parseFloat(item.Stan || 0);
+      if (!acc[date]) {
+        acc[date] = { date: date, transakcje: 0 };
+      }
+      acc[date].transakcje += quantity;
+      return acc;
+    }, {});
+    const processedDailyTransactionsData = Object.values(dailyTransactionsMap).sort((a, b) => new Date(a.date) - new Date(b.date));
+    setDailyTransactionsData(processedDailyTransactionsData);
+
+    // Zwróć przetworzone dane do zapisania w cache
+    return {
+      monthlyData: processedMonthlyData,
+      categoryData: processedCategoryData,
+      groupData: processedGroupData,
+      dailyTransactionsData: processedDailyTransactionsData
+    };
   };
 
   // Funkcja pomocnicza do generowania losowych kolorów
@@ -141,10 +174,6 @@ function SalesAnalysis() {
     }
     return color;
   };
-
-  if (loading) {
-    return <div className="text-center text-lg font-medium">Ładowanie danych...</div>;
-  }
 
   if (error) {
     return <div className="text-center text-lg font-medium text-red-600">Błąd: {error.message}</div>;
@@ -161,10 +190,6 @@ function SalesAnalysis() {
           <button className="btn-secondary flex items-center space-x-2">
             <Filter className="w-4 h-4" />
             <span>Filtruj</span>
-          </button>
-          <button className="btn-primary flex items-center space-x-2">
-            <Download className="w-4 h-4" />
-            <span>Eksportuj raport</span>
           </button>
         </div>
       </div>
@@ -457,6 +482,79 @@ function SalesAnalysis() {
           </div>
         </div>
       </div>
+
+      {/* Przycisk pomocy */}
+      <button
+        onClick={() => setShowHelp(true)}
+        className="fixed bottom-6 right-6 w-14 h-14 bg-primary-600 hover:bg-primary-700 text-white rounded-full shadow-lg flex items-center justify-center transition-all hover:scale-110 z-40"
+        title="Pomoc"
+      >
+        <HelpCircle className="w-7 h-7" />
+      </button>
+
+      {/* Modal pomocy */}
+      {showHelp && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 bg-white border-b px-6 py-4 flex items-center justify-between rounded-t-2xl">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center">
+                  <HelpCircle className="w-6 h-6 text-purple-600" />
+                </div>
+                <h2 className="text-xl font-bold text-gray-900">Analiza Sprzedazy - Pomoc</h2>
+              </div>
+              <button onClick={() => setShowHelp(false)} className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+            <div className="p-6 space-y-6">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">Do czego sluzy ten widok?</h3>
+                <p className="text-gray-600">
+                  Widok Analiza Sprzedazy prezentuje szczegolowe raporty i trendy sprzedazowe na podstawie danych
+                  z systemu. Pozwala analizowac wyniki w roznych okresach czasowych.
+                </p>
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-3">Glowne funkcjonalnosci:</h3>
+                <div className="space-y-3">
+                  <div className="flex items-start space-x-3 p-3 bg-blue-50 rounded-lg">
+                    <Calendar className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Wybor okresu</p>
+                      <p className="text-sm text-gray-600">Przeglad danych w ukladzie dziennym, tygodniowym, miesiecznym lub rocznym.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-green-50 rounded-lg">
+                    <TrendingUp className="w-5 h-5 text-green-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Wykresy sprzedazy</p>
+                      <p className="text-sm text-gray-600">Wizualizacja sprzedazy dziennej, kategorii produktow i grup.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-purple-50 rounded-lg">
+                    <Package className="w-5 h-5 text-purple-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Analiza kategorii</p>
+                      <p className="text-sm text-gray-600">Udzial procentowy kategorii i grup produktow w sprzedazy.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h4 className="font-medium text-gray-900 mb-2">Wskazowka</h4>
+                <p className="text-sm text-gray-600">
+                  Korzystaj z tabel podsumowania aby szybko porownac wyniki w roznych okresach.
+                  Wykres kategorii pomoze zidentyfikowac najlepiej sprzedajace sie grupy produktow.
+                </p>
+              </div>
+            </div>
+            <div className="sticky bottom-0 bg-gray-50 px-6 py-4 border-t rounded-b-2xl">
+              <button onClick={() => setShowHelp(false)} className="w-full btn-primary">Rozumiem</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

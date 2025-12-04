@@ -2,35 +2,78 @@ import React, { useState, useEffect } from 'react'
 import { TrendingUp, TrendingDown, AlertCircle, RefreshCw, Clock } from 'lucide-react'
 import { API_BASE_URL } from '../config/api'
 
+// Klucze cache w localStorage
+const CACHE_KEYS = {
+  stats: 'dashboard_stats_cache',
+  salesPlans: 'dashboard_salesPlans_cache',
+  storeMetrics: 'dashboard_storeMetrics_cache',
+  footfall: 'dashboard_footfall_cache',
+  lastUpdate: 'dashboard_lastUpdate_cache'
+};
+
+// Funkcja do odczytu cache
+const getFromCache = (key, defaultValue) => {
+  try {
+    const cached = localStorage.getItem(key);
+    return cached ? JSON.parse(cached) : defaultValue;
+  } catch {
+    return defaultValue;
+  }
+};
+
+// Funkcja do zapisu cache
+const saveToCache = (key, value) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (e) {
+    console.warn('Błąd zapisu cache:', e);
+  }
+};
+
 function DashboardTable() {
   const API_URL = API_BASE_URL;
-  const [loading, setLoading] = useState(true);
+  const [initialLoading, setInitialLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [stats, setStats] = useState(null);
-  const [salesPlans, setSalesPlans] = useState(null);
-  const [storeMetrics, setStoreMetrics] = useState(null);
-  const [footfall, setFootfall] = useState(null);  // Wejścia z AGIS
+
+  // Inicjalizacja stanów z cache - od razu pokazuje ostatnie dane
+  const [stats, setStats] = useState(() => getFromCache(CACHE_KEYS.stats, { warehouse_stats: [] }));
+  const [salesPlans, setSalesPlans] = useState(() => getFromCache(CACHE_KEYS.salesPlans, {}));
+  const [storeMetrics, setStoreMetrics] = useState(() => getFromCache(CACHE_KEYS.storeMetrics, {}));
+  const [footfall, setFootfall] = useState(() => getFromCache(CACHE_KEYS.footfall, { GLS: 0, JNS: 0 }));
   const [currentTime, setCurrentTime] = useState(new Date());
-  const [lastUpdate, setLastUpdate] = useState(null);
+  const [lastUpdate, setLastUpdate] = useState(() => {
+    const cached = getFromCache(CACHE_KEYS.lastUpdate, null);
+    return cached ? new Date(cached) : null;
+  });
   const [nextRefresh, setNextRefresh] = useState(60);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   const REFRESH_INTERVAL = 60; // sekundy
 
-  // Funkcja do odświeżania wszystkich danych
-  const refreshAllData = async () => {
-    await Promise.all([
-      fetchDashboardStats(),
-      fetchSalesPlans(),
-      fetchStoreMetrics(),
-      fetchFootfall()  // Pobierz wejścia z AGIS
-    ]);
-    setLastUpdate(new Date());
-    setNextRefresh(REFRESH_INTERVAL);
+  // Funkcja do odświeżania wszystkich danych (w tle, bez przeładowania)
+  const refreshAllData = async (isInitial = false) => {
+    if (!isInitial) setIsRefreshing(true);
+
+    try {
+      await Promise.all([
+        fetchDashboardStats(isInitial),
+        fetchSalesPlans(),
+        fetchStoreMetrics(),
+        fetchFootfall()
+      ]);
+      const now = new Date();
+      setLastUpdate(now);
+      saveToCache(CACHE_KEYS.lastUpdate, now.toISOString());
+      setNextRefresh(REFRESH_INTERVAL);
+    } finally {
+      if (isInitial) setInitialLoading(false);
+      setIsRefreshing(false);
+    }
   };
 
   useEffect(() => {
     // Pierwsze pobranie danych
-    refreshAllData();
+    refreshAllData(true);
 
     // Zegar co sekundę
     const clockInterval = setInterval(() => {
@@ -49,20 +92,19 @@ function DashboardTable() {
     };
   }, []);
 
-  const fetchDashboardStats = async () => {
+  const fetchDashboardStats = async (isInitial = false) => {
     try {
-      setLoading(true);
       const response = await fetch(`${API_URL}/api/dashboard-stats`);
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
       const data = await response.json();
       setStats(data);
+      saveToCache(CACHE_KEYS.stats, data);
+      if (isInitial) setError(null);
     } catch (error) {
-      setError(error);
+      if (isInitial) setError(error);
       console.error("Błąd podczas pobierania statystyk dashboardu:", error);
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -75,30 +117,17 @@ function DashboardTable() {
       const data = await response.json();
       if (data.success && data.plan) {
         // Mapowanie nazw z API do nazw magazynów
-        setSalesPlans({
+        const plans = {
           'GLS': data.plan.gls || 0,
           '4F': data.plan.four_f || 0,
           'JEANS': data.plan.jeans || 0,
           'total': data.plan.total || 0
-        });
-      } else {
-        // Fallback do domyślnych wartości
-        setSalesPlans({
-          'GLS': 15600,
-          '4F': 11571,
-          'JEANS': 7700,
-          'total': 34871
-        });
+        };
+        setSalesPlans(plans);
+        saveToCache(CACHE_KEYS.salesPlans, plans);
       }
     } catch (error) {
       console.error("Błąd podczas pobierania planów sprzedażowych:", error);
-      // Fallback do domyślnych wartości
-      setSalesPlans({
-        'GLS': 15600,
-        '4F': 11571,
-        'JEANS': 7700,
-        'total': 34871
-      });
     }
   };
 
@@ -111,6 +140,7 @@ function DashboardTable() {
       const data = await response.json();
       if (data.success) {
         setStoreMetrics(data);
+        saveToCache(CACHE_KEYS.storeMetrics, data);
       }
     } catch (error) {
       console.error("Błąd podczas pobierania metryk sklepów:", error);
@@ -126,6 +156,7 @@ function DashboardTable() {
       const data = await response.json();
       if (data.success) {
         setFootfall(data.data);
+        saveToCache(CACHE_KEYS.footfall, data.data);
       }
     } catch (error) {
       console.error("Błąd podczas pobierania wejść:", error);
@@ -152,16 +183,6 @@ function DashboardTable() {
     return 'bg-gray-50';
   };
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600 mx-auto"></div>
-          <p className="mt-4 text-gray-600">Ładowanie danych dashboardu...</p>
-        </div>
-      </div>
-    );
-  }
 
   if (error) {
     return (
@@ -220,14 +241,16 @@ function DashboardTable() {
 
   const totalWarehouseTransactions = calculateTotalTransactions();
 
-  // Oblicz sumę sprzedanych sztuk - dla 4F weź bezpośrednio z Google Sheets (sztuki)
+  // Oblicz sumę sprzedanych sztuk - dla 4F oblicz z paragony * upt
   const calculateTotalItems = () => {
     if (!stats?.warehouse_stats) return 0;
     return stats.warehouse_stats.reduce((sum, w) => {
       if (w.nazwa === '4F') {
-        // Dla 4F weź sztuki bezpośrednio z Google Sheets
+        // Dla 4F oblicz sztuki jako paragony * upt
         const metrics4F = getMetrics('4F');
-        return sum + (metrics4F?.sztuki || 0);
+        const paragony4F = metrics4F?.paragony || 0;
+        const upt4F = metrics4F?.upt || 0;
+        return sum + (paragony4F * upt4F);
       }
       return sum + w.ilosc_sprzedana;
     }, 0);
@@ -268,11 +291,12 @@ function DashboardTable() {
           </div>
         </div>
         <button
-          onClick={refreshAllData}
+          onClick={() => refreshAllData(false)}
           className="btn-secondary flex items-center space-x-2"
+          disabled={isRefreshing}
         >
-          <RefreshCw className="w-4 h-4" />
-          <span>Odśwież</span>
+          <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+          <span>{isRefreshing ? 'Odświeżam...' : 'Odśwież'}</span>
         </button>
       </div>
 

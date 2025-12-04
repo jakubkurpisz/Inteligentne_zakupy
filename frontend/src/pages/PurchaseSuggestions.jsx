@@ -1,4 +1,5 @@
-import { ShoppingCart, Tag, TrendingDown, Clock, Package, DollarSign } from 'lucide-react'
+import { useState } from 'react'
+import { ShoppingCart, Tag, TrendingDown, Clock, Package, DollarSign, HelpCircle, X } from 'lucide-react'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 
 const purchaseSuggestions = [
@@ -88,6 +89,8 @@ const rotationData = [
 ]
 
 function PurchaseSuggestions() {
+  const [showHelp, setShowHelp] = useState(false);
+
   return (
     <div className="space-y-6">
       {/* Nagłówek */}
@@ -296,6 +299,86 @@ function PurchaseSuggestions() {
           </div>
         </div>
       </div>
+
+      {/* Przycisk pomocy */}
+      <button
+        onClick={() => setShowHelp(true)}
+        className="fixed bottom-6 right-6 w-14 h-14 bg-primary-600 hover:bg-primary-700 text-white rounded-full shadow-lg flex items-center justify-center transition-all hover:scale-110 z-40"
+        title="Pomoc"
+      >
+        <HelpCircle className="w-7 h-7" />
+      </button>
+
+      {/* Modal pomocy */}
+      {showHelp && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 bg-white border-b px-6 py-4 flex items-center justify-between rounded-t-2xl">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
+                  <HelpCircle className="w-6 h-6 text-blue-600" />
+                </div>
+                <h2 className="text-xl font-bold text-gray-900">Sugestie Zakupow i Przecen - Pomoc</h2>
+              </div>
+              <button onClick={() => setShowHelp(false)} className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+            <div className="p-6 space-y-6">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">Do czego sluzy ten widok?</h3>
+                <p className="text-gray-600">
+                  Widok Sugestie Zakupow i Przecen dostarcza inteligentne rekomendacje dotyczace optymalizacji
+                  zapasow i polityki cenowej na podstawie analizy rotacji i trendow sprzedazy.
+                </p>
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-3">Glowne funkcjonalnosci:</h3>
+                <div className="space-y-3">
+                  <div className="flex items-start space-x-3 p-3 bg-blue-50 rounded-lg">
+                    <ShoppingCart className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Rekomendowane zamowienia</p>
+                      <p className="text-sm text-gray-600">Lista produktow wymagajacych uzupelnienia z priorytetami i przewidywanymi terminami wyczerpania.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-orange-50 rounded-lg">
+                    <Tag className="w-5 h-5 text-orange-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Rekomendowane przeceny</p>
+                      <p className="text-sm text-gray-600">Produkty o niskiej rotacji z sugerowanymi nowymi cenami i poziomem rabatu.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-purple-50 rounded-lg">
+                    <Package className="w-5 h-5 text-purple-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Analiza rotacji</p>
+                      <p className="text-sm text-gray-600">Porownanie aktualnej i optymalnej rotacji wedlug kategorii produktow.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-green-50 rounded-lg">
+                    <DollarSign className="w-5 h-5 text-green-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Potencjalne oszczednosci</p>
+                      <p className="text-sm text-gray-600">Wyliczenie potencjalnych oszczednosci i uwolnionego kapitalu.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h4 className="font-medium text-gray-900 mb-2">Wskazowka</h4>
+                <p className="text-sm text-gray-600">
+                  Zwracaj uwage na produkty z priorytetem "Krytyczny" - ryzyko wyczerpania zapasow w najblizszych dniach.
+                  Dla produktow o niskiej rotacji rozważ przeceny lub akcje promocyjne.
+                </p>
+              </div>
+            </div>
+            <div className="sticky bottom-0 bg-gray-50 px-6 py-4 border-t rounded-b-2xl">
+              <button onClick={() => setShowHelp(false)} className="w-full btn-primary">Rozumiem</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -1,15 +1,34 @@
-import React, { useState, useEffect } from 'react'
-import { AlertTriangle, XCircle, TrendingDown, Calendar, DollarSign, Package, Search, Filter, Download, Warehouse, RefreshCw, Save, BookMarked, Trash2, Check } from 'lucide-react'
+import React, { useState, useEffect, useRef } from 'react'
+import { AlertTriangle, XCircle, TrendingDown, Calendar, DollarSign, Package, Search, Filter, Warehouse, RefreshCw, Save, BookMarked, Trash2, Check, HelpCircle, X } from 'lucide-react'
 import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import { API_BASE_URL } from '../config/api'
 import MultiSelect from '../components/MultiSelect'
 import Toast from '../components/Toast'
 
+// Cache helpers
+const CACHE_KEY = 'deadStock_cache';
+const getFromCache = (defaultValue) => {
+  try {
+    const cached = localStorage.getItem(CACHE_KEY);
+    return cached ? JSON.parse(cached) : defaultValue;
+  } catch { return defaultValue; }
+};
+const saveToCache = (value) => {
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify(value)); } catch {}
+};
+
 function DeadStock() {
   const API_URL = API_BASE_URL;
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [deadStockData, setDeadStockData] = useState(null);
+  const [deadStockData, setDeadStockData] = useState(() => getFromCache({
+    total_items: 0,
+    total_frozen_value: 0,
+    avg_days_no_movement: 0,
+    category_stats: {},
+    items: [],
+    filters: { marki: [], rodzaje: [], grupy: [] }
+  }));
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState(null);
 
@@ -42,12 +61,19 @@ function DeadStock() {
   // Toast notifications
   const [toast, setToast] = useState(null);
 
+  // Stan dla okna pomocy
+  const [showHelp, setShowHelp] = useState(false);
+
   // Mapowanie magazynów
   const magazyny = {
     '1': 'GLS',
     '2': '4F',
     '7': 'JEANS'
   };
+
+  // Ref do śledzenia czy już pobrano dane
+  const hasFetchedRef = useRef(false);
+  const lastFetchParamsRef = useRef('');
 
   // Wczytaj zapisane filtry z localStorage przy montowaniu komponentu
   useEffect(() => {
@@ -59,10 +85,20 @@ function DeadStock() {
         console.error('Błąd wczytywania zapisanych filtrów:', e);
       }
     }
+    // Pobierz dane tylko raz przy pierwszym montowaniu
+    if (!hasFetchedRef.current) {
+      hasFetchedRef.current = true;
+      fetchDeadStock();
+    }
   }, []);
 
+  // Pobierz dane gdy zmienią się filtry (ale nie przy pierwszym montowaniu)
   useEffect(() => {
-    fetchDeadStock();
+    const params = `${minDays}-${minValue}-${selectedCategory}-${selectedMarki.join(',')}-${selectedRodzaje.join(',')}-${selectedRotationStatus}-${sortBy}-${selectedMagazyny.join(',')}`;
+    if (hasFetchedRef.current && params !== lastFetchParamsRef.current) {
+      lastFetchParamsRef.current = params;
+      fetchDeadStock();
+    }
   }, [minDays, minValue, selectedCategory, selectedMarki, selectedRodzaje, selectedRotationStatus, sortBy, selectedMagazyny]);
 
   const toggleMagazyn = (magId) => {
@@ -101,6 +137,7 @@ function DeadStock() {
       }
       const data = await response.json();
       setDeadStockData(data);
+      saveToCache(data);
 
       // Wyciągnij unikalne marki, rodzaje i grupy z danych
       if (data.items && data.items.length > 0) {
@@ -147,17 +184,17 @@ function DeadStock() {
 
   const getCategorySeverity = (category) => {
     const severity = {
-      'NEW': 'NOWY',
-      'NEW_NO_SALES': 'NOWY BEZ SPRZEDAŻY',
-      'NEW_SELLING': 'NOWY - SPRZEDAJE SIĘ',
-      'NEW_SLOW': 'NOWY - WOLNY',
+      'NEW': 'NOWY (<30d)',
+      'NEW_NO_SALES': 'NOWY 0 SPRZ.',
+      'NEW_SELLING': 'NOWY OK',
+      'NEW_SLOW': 'NOWY WOLNY',
       'REPEATED_NO_SALES': 'BŁĄD ZAKUPU',
-      'VERY_FAST': 'BARDZO SZYBKI',
-      'FAST': 'SZYBKI',
-      'NORMAL': 'NORMALNY',
-      'SLOW': 'WOLNY',
-      'VERY_SLOW': 'BARDZO WOLNY',
-      'DEAD': 'KRYTYCZNY'
+      'VERY_FAST': '<30d zapasu',
+      'FAST': '30-90d zapasu',
+      'NORMAL': '90-180d zapasu',
+      'SLOW': '180-365d zapasu',
+      'VERY_SLOW': '>365d zapasu',
+      'DEAD': 'BRAK ROTACJI'
     };
     return severity[category] || 'NIEZNANY';
   };
@@ -287,16 +324,8 @@ function DeadStock() {
     .sort((a, b) => b.value - a.value)
     .slice(0, 10) : [];
 
-  if (loading) {
-    return <div className="text-center text-lg font-medium">Ładowanie danych martwych stanów...</div>;
-  }
-
   if (error) {
     return <div className="text-center text-lg font-medium text-red-600">Błąd: {error.message}</div>;
-  }
-
-  if (!deadStockData) {
-    return <div className="text-center text-lg font-medium">Brak danych</div>;
   }
 
   return (
@@ -311,7 +340,7 @@ function DeadStock() {
           <div className="flex items-center space-x-2 px-4 py-2 bg-red-100 rounded-lg">
             <AlertTriangle className="w-5 h-5 text-red-600" />
             <span className="text-sm font-medium text-red-900">
-              {deadStockData.total_items} produktów wymaga uwagi
+              {deadStockData?.total_items || 0} produktów wymaga uwagi
             </span>
           </div>
           <button
@@ -331,7 +360,7 @@ function DeadStock() {
             <div>
               <p className="text-sm text-gray-600 font-medium">Błąd zakupu</p>
               <p className="text-3xl font-bold text-gray-900 mt-2">
-                {deadStockData.category_stats.REPEATED_NO_SALES || 0}
+                {deadStockData?.category_stats?.REPEATED_NO_SALES || 0}
               </p>
               <div className="flex items-center mt-2 text-pink-600">
                 <AlertTriangle className="w-4 h-4 mr-1" />
@@ -346,7 +375,7 @@ function DeadStock() {
             <div>
               <p className="text-sm text-gray-600 font-medium">Produkty DEAD</p>
               <p className="text-3xl font-bold text-gray-900 mt-2">
-                {deadStockData.category_stats.DEAD || 0}
+                {deadStockData?.category_stats?.DEAD || 0}
               </p>
               <div className="flex items-center mt-2 text-red-600">
                 <XCircle className="w-4 h-4 mr-1" />
@@ -361,7 +390,7 @@ function DeadStock() {
             <div>
               <p className="text-sm text-gray-600 font-medium">Bardzo wolne</p>
               <p className="text-3xl font-bold text-gray-900 mt-2">
-                {deadStockData.category_stats.VERY_SLOW || 0}
+                {deadStockData?.category_stats?.VERY_SLOW || 0}
               </p>
               <div className="flex items-center mt-2 text-orange-600">
                 <TrendingDown className="w-4 h-4 mr-1" />
@@ -376,7 +405,7 @@ function DeadStock() {
             <div>
               <p className="text-sm text-gray-600 font-medium">Zamrożony kapitał</p>
               <p className="text-3xl font-bold text-gray-900 mt-2">
-                {formatNumber(deadStockData.total_frozen_value)} zł
+                {formatNumber(deadStockData?.total_frozen_value || 0)} zł
               </p>
               <div className="flex items-center mt-2 text-green-600">
                 <DollarSign className="w-4 h-4 mr-1" />
@@ -391,7 +420,7 @@ function DeadStock() {
             <div>
               <p className="text-sm text-gray-600 font-medium">Średni wiek</p>
               <p className="text-3xl font-bold text-gray-900 mt-2">
-                {formatNumber(deadStockData.avg_days_no_movement, 0)} dni
+                {formatNumber(deadStockData?.avg_days_no_movement || 0, 0)} dni
               </p>
               <div className="flex items-center mt-2 text-purple-600">
                 <Calendar className="w-4 h-4 mr-1" />
@@ -447,15 +476,6 @@ function DeadStock() {
               </select>
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Akcje
-              </label>
-              <button className="w-full btn-primary flex items-center justify-center space-x-2">
-                <Download className="w-4 h-4" />
-                <span>Eksportuj</span>
-              </button>
-            </div>
           </div>
 
           {/* Filtry magazynowe */}
@@ -586,7 +606,7 @@ function DeadStock() {
           <div className="border-t pt-4">
             <div className="flex items-center space-x-3 mb-3">
               <Filter className="w-5 h-5 text-gray-400" />
-              <span className="text-sm font-medium text-gray-700">Status rotacji:</span>
+              <span className="text-sm font-medium text-gray-700">Rotacja (dni zapasu):</span>
             </div>
             <div className="flex flex-wrap gap-2">
               <button
@@ -600,6 +620,16 @@ function DeadStock() {
                 Wszystkie
               </button>
               <button
+                onClick={() => setSelectedRotationStatus('REPEATED_NO_SALES')}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  selectedRotationStatus === 'REPEATED_NO_SALES'
+                    ? 'bg-pink-600 text-white hover:bg-pink-700'
+                    : 'bg-pink-100 text-pink-700 hover:bg-pink-200'
+                }`}
+              >
+                BŁĄD ZAKUPU
+              </button>
+              <button
                 onClick={() => setSelectedRotationStatus('DEAD')}
                 className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
                   selectedRotationStatus === 'DEAD'
@@ -607,7 +637,7 @@ function DeadStock() {
                     : 'bg-red-100 text-red-700 hover:bg-red-200'
                 }`}
               >
-                Martwy (brak sprzedaży)
+                BRAK ROTACJI (0 sprz.)
               </button>
               <button
                 onClick={() => setSelectedRotationStatus('VERY_SLOW')}
@@ -617,7 +647,7 @@ function DeadStock() {
                     : 'bg-orange-100 text-orange-700 hover:bg-orange-200'
                 }`}
               >
-                Bardzo wolny (&gt;365 dni zapasu)
+                &gt;365 dni zapasu
               </button>
               <button
                 onClick={() => setSelectedRotationStatus('SLOW')}
@@ -627,7 +657,7 @@ function DeadStock() {
                     : 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200'
                 }`}
               >
-                Wolny (181-365 dni zapasu)
+                180-365 dni zapasu
               </button>
               <button
                 onClick={() => setSelectedRotationStatus('NORMAL')}
@@ -637,17 +667,7 @@ function DeadStock() {
                     : 'bg-blue-100 text-blue-700 hover:bg-blue-200'
                 }`}
               >
-                Normalny (91-180 dni zapasu)
-              </button>
-              <button
-                onClick={() => setSelectedRotationStatus('VERY_FAST')}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                  selectedRotationStatus === 'VERY_FAST'
-                    ? 'bg-emerald-600 text-white hover:bg-emerald-700'
-                    : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
-                }`}
-              >
-                Bardzo szybki (0-30 dni zapasu)
+                90-180 dni zapasu
               </button>
               <button
                 onClick={() => setSelectedRotationStatus('FAST')}
@@ -657,7 +677,17 @@ function DeadStock() {
                     : 'bg-green-100 text-green-700 hover:bg-green-200'
                 }`}
               >
-                Szybki (31-90 dni zapasu)
+                30-90 dni zapasu
+              </button>
+              <button
+                onClick={() => setSelectedRotationStatus('VERY_FAST')}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  selectedRotationStatus === 'VERY_FAST'
+                    ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                    : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
+                }`}
+              >
+                &lt;30 dni zapasu
               </button>
               <button
                 onClick={() => setSelectedRotationStatus('NEW')}
@@ -667,17 +697,7 @@ function DeadStock() {
                     : 'bg-purple-100 text-purple-700 hover:bg-purple-200'
                 }`}
               >
-                Nowy (&lt;30 dni w systemie)
-              </button>
-              <button
-                onClick={() => setSelectedRotationStatus('REPEATED_NO_SALES')}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                  selectedRotationStatus === 'REPEATED_NO_SALES'
-                    ? 'bg-pink-600 text-white hover:bg-pink-700'
-                    : 'bg-pink-100 text-pink-700 hover:bg-pink-200'
-                }`}
-              >
-                Błąd zakupu (powtórny zakup bez sprzedaży)
+                Nowy (&lt;30d w systemie)
               </button>
             </div>
           </div>
@@ -740,118 +760,220 @@ function DeadStock() {
         </div>
       </div>
 
-      {/* Szczegółowa lista produktów */}
+      {/* Tabela produktów - priorytetyzowana */}
       <div className="card">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Produkty wymagające uwagi</h2>
-        <div className="space-y-4">
-          {filteredItems.slice(0, 20).map((item, index) => {
-            const color = getCategoryColor(item.Category);
-            const severity = getCategorySeverity(item.Category);
-
-            return (
-              <div
-                key={index}
-                className={`border-2 rounded-lg p-6 ${
-                  color === 'red' ? 'border-red-300 bg-red-50' :
-                  color === 'orange' ? 'border-orange-300 bg-orange-50' :
-                  color === 'yellow' ? 'border-yellow-300 bg-yellow-50' :
-                  color === 'pink' ? 'border-pink-300 bg-pink-50' :
-                  color === 'purple' ? 'border-purple-300 bg-purple-50' :
-                  color === 'green' ? 'border-green-300 bg-green-50' :
-                  color === 'emerald' ? 'border-emerald-300 bg-emerald-50' :
-                  color === 'blue' ? 'border-blue-300 bg-blue-50' :
-                  'border-gray-300 bg-gray-50'
-                }`}
-              >
-                <div className="flex items-start justify-between mb-4">
-                  <div className="flex-1">
-                    <div className="flex items-center space-x-3 mb-2">
-                      <AlertTriangle className={`w-6 h-6 ${
-                        color === 'red' ? 'text-red-600' :
-                        color === 'orange' ? 'text-orange-600' :
-                        color === 'yellow' ? 'text-yellow-600' :
-                        color === 'pink' ? 'text-pink-600' :
-                        color === 'purple' ? 'text-purple-600' :
-                        color === 'green' ? 'text-green-600' :
-                        color === 'emerald' ? 'text-emerald-600' :
-                        color === 'blue' ? 'text-blue-600' :
-                        'text-gray-600'
-                      }`} />
-                      <div>
-                        <h3 className="text-lg font-semibold text-gray-900">{item.Nazwa}</h3>
-                        <p className="text-sm text-gray-600">
-                          {item.Symbol} | {item.Marka} | {item.Rodzaj}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-bold ${
-                      color === 'red' ? 'bg-red-200 text-red-900' :
-                      color === 'orange' ? 'bg-orange-200 text-orange-900' :
-                      color === 'yellow' ? 'bg-yellow-200 text-yellow-900' :
-                      color === 'pink' ? 'bg-pink-200 text-pink-900' :
-                      color === 'purple' ? 'bg-purple-200 text-purple-900' :
-                      color === 'green' ? 'bg-green-200 text-green-900' :
-                      color === 'emerald' ? 'bg-emerald-200 text-emerald-900' :
-                      color === 'blue' ? 'bg-blue-200 text-blue-900' :
-                      'bg-gray-200 text-gray-900'
-                    }`}>
-                      {severity}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 md:grid-cols-6 gap-4 mb-4">
-                  <div>
-                    <p className="text-xs text-gray-600 mb-1">Stan</p>
-                    <p className="text-lg font-bold text-gray-900">{formatNumber(item.Stan, 0)} szt.</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-600 mb-1">Dni bez ruchu</p>
-                    <p className="text-lg font-bold text-gray-900">{item.DaysNoMovement}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-600 mb-1">Wartość zamrożona</p>
-                    <p className="text-lg font-bold text-red-600">{formatNumber(item.FrozenValue)} zł</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-600 mb-1">Sprzedaż 90 dni</p>
-                    <p className="text-lg font-bold text-gray-900">{formatNumber(item.IloscSprzedana90dni, 0)} szt.</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-600 mb-1">Rotacja</p>
-                    <p className="text-lg font-bold text-blue-600">{item.TurnoverRatio}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-600 mb-1">Cena</p>
-                    <p className="text-lg font-bold text-gray-900">{formatNumber(item.DetalicznaNetto)} zł</p>
-                  </div>
-                </div>
-
-                <div className="bg-white/70 rounded-lg p-4 mb-4">
-                  <div className="flex items-center space-x-2 mb-2">
-                    <Calendar className="w-4 h-4 text-gray-500" />
-                    <p className="text-sm text-gray-600">
-                      Ostatnia zmiana stanu: <span className="font-medium text-gray-900">{item.LastStanChange || 'Brak danych'}</span>
-                      {item.OstatniaSprzedaz && (
-                        <> | Ostatnia sprzedaż: <span className="font-medium text-gray-900">{item.OstatniaSprzedaz}</span></>
-                      )}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="bg-white/70 rounded-lg p-4">
-                  <p className="text-sm font-medium text-gray-900 mb-2">Rekomendacja:</p>
-                  <p className="text-sm text-gray-700">{item.Recommendation}</p>
-                </div>
-              </div>
-            );
-          })}
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-gray-900">Produkty wymagające uwagi</h2>
+          <div className="text-sm text-gray-500">
+            Priorytet: dni bez ruchu + dni zapasu (rotacja) + wartość zamrożona
+          </div>
         </div>
-        {filteredItems.length > 20 && (
-          <div className="p-4 text-center text-sm text-gray-500">
-            Wyświetlono 20 z {filteredItems.length} produktów. Użyj wyszukiwarki aby zawęzić wyniki.
+
+        <div className="overflow-x-auto">
+          <table className="min-w-full">
+            <thead className="bg-gray-100">
+              <tr>
+                <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider sticky left-0 bg-gray-100">
+                  Status
+                </th>
+                <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">
+                  Produkt
+                </th>
+                <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">
+                  Kategoria
+                </th>
+                <th className="px-3 py-3 text-right text-xs font-bold text-gray-700 uppercase tracking-wider">
+                  Wartość zamrożona
+                </th>
+                <th className="px-3 py-3 text-right text-xs font-bold text-gray-700 uppercase tracking-wider">
+                  Stan
+                </th>
+                <th className="px-3 py-3 text-right text-xs font-bold text-gray-700 uppercase tracking-wider">
+                  Dni bez ruchu
+                </th>
+                <th className="px-3 py-3 text-right text-xs font-bold text-gray-700 uppercase tracking-wider">
+                  Sprz. 90d
+                </th>
+                <th className="px-3 py-3 text-right text-xs font-bold text-gray-700 uppercase tracking-wider">
+                  Dni zapasu
+                </th>
+                <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">
+                  Ostatnia sprz.
+                </th>
+                <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider min-w-[200px]">
+                  Rekomendacja
+                </th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-200">
+              {filteredItems
+                // Sortowanie priorytetowe: dni bez ruchu + dni zapasu (rotacja) + wartość
+                .sort((a, b) => {
+                  // 1. Najpierw błędy zakupu (powtórne zakupy bez sprzedaży)
+                  if (a.Category === 'REPEATED_NO_SALES' && b.Category !== 'REPEATED_NO_SALES') return -1;
+                  if (b.Category === 'REPEATED_NO_SALES' && a.Category !== 'REPEATED_NO_SALES') return 1;
+
+                  // 2. Dni bez ruchu (malejąco) - im więcej dni bez ruchu, tym wyżej
+                  const daysNoMovA = a.DaysNoMovement || 0;
+                  const daysNoMovB = b.DaysNoMovement || 0;
+                  if (Math.abs(daysNoMovA - daysNoMovB) > 30) {
+                    return daysNoMovB - daysNoMovA;
+                  }
+
+                  // 3. Dni zapasu / rotacja (malejąco) - im więcej dni zapasu, tym gorzej
+                  const daysStockA = a.DniZapasu === null || a.DniZapasu === undefined ? 99999 : a.DniZapasu;
+                  const daysStockB = b.DniZapasu === null || b.DniZapasu === undefined ? 99999 : b.DniZapasu;
+                  if (daysStockA !== daysStockB) {
+                    return daysStockB - daysStockA;
+                  }
+
+                  // 4. Na końcu wartość zamrożona (malejąco)
+                  const valueA = a.FrozenValue || 0;
+                  const valueB = b.FrozenValue || 0;
+                  return valueB - valueA;
+                })
+                .slice(0, 50)
+                .map((item, index) => {
+                  const color = getCategoryColor(item.Category);
+                  const severity = getCategorySeverity(item.Category);
+
+                  // Określ kolor tła wiersza na podstawie dni bez ruchu i rotacji
+                  const dniZapasu = item.DniZapasu === null || item.DniZapasu === undefined ? 99999 : item.DniZapasu;
+                  const dniBezRuchu = item.DaysNoMovement || 0;
+
+                  let rowBgClass = 'hover:bg-gray-50';
+                  if (item.Category === 'REPEATED_NO_SALES') {
+                    rowBgClass = 'bg-pink-100 hover:bg-pink-200'; // Błąd zakupu - różowy
+                  } else if (dniBezRuchu >= 180 || dniZapasu >= 9999) {
+                    rowBgClass = 'bg-red-50 hover:bg-red-100'; // Krytyczny - czerwony
+                  } else if (dniBezRuchu >= 90 || dniZapasu >= 365) {
+                    rowBgClass = 'bg-orange-50 hover:bg-orange-100'; // Bardzo wolny - pomarańczowy
+                  } else if (dniBezRuchu >= 60 || dniZapasu >= 180) {
+                    rowBgClass = 'bg-yellow-50 hover:bg-yellow-100'; // Wolny - żółty
+                  }
+
+                  return (
+                    <tr key={index} className={rowBgClass}>
+                      {/* Status */}
+                      <td className={`px-3 py-2 whitespace-nowrap sticky left-0 ${rowBgClass}`}>
+                        <span className={`inline-flex items-center px-2 py-1 rounded text-xs font-bold ${
+                          color === 'red' ? 'bg-red-200 text-red-900' :
+                          color === 'orange' ? 'bg-orange-200 text-orange-900' :
+                          color === 'yellow' ? 'bg-yellow-200 text-yellow-900' :
+                          color === 'pink' ? 'bg-pink-200 text-pink-900' :
+                          color === 'purple' ? 'bg-purple-200 text-purple-900' :
+                          color === 'green' ? 'bg-green-200 text-green-900' :
+                          color === 'emerald' ? 'bg-emerald-200 text-emerald-900' :
+                          color === 'blue' ? 'bg-blue-200 text-blue-900' :
+                          'bg-gray-200 text-gray-900'
+                        }`}>
+                          {severity}
+                        </span>
+                      </td>
+
+                      {/* Produkt */}
+                      <td className="px-3 py-2">
+                        <div className="max-w-xs">
+                          <p className="text-sm font-medium text-gray-900 truncate" title={item.Nazwa}>
+                            {item.Nazwa}
+                          </p>
+                          <p className="text-xs text-gray-500">
+                            {item.Symbol} | {item.Marka}
+                          </p>
+                        </div>
+                      </td>
+
+                      {/* Kategoria/Rodzaj */}
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        <span className="text-sm text-gray-700">{item.Rodzaj || '-'}</span>
+                      </td>
+
+                      {/* Wartość zamrożona */}
+                      <td className="px-3 py-2 whitespace-nowrap text-right">
+                        <span className={`text-sm font-bold ${
+                          item.FrozenValue >= 5000 ? 'text-red-700' :
+                          item.FrozenValue >= 1000 ? 'text-orange-600' :
+                          'text-gray-900'
+                        }`}>
+                          {formatNumber(item.FrozenValue)} zł
+                        </span>
+                      </td>
+
+                      {/* Stan */}
+                      <td className="px-3 py-2 whitespace-nowrap text-right">
+                        <span className="text-sm text-gray-900">{formatNumber(item.Stan, 0)} szt.</span>
+                      </td>
+
+                      {/* Dni bez ruchu */}
+                      <td className="px-3 py-2 whitespace-nowrap text-right">
+                        <span className={`text-sm font-medium ${
+                          item.DaysNoMovement >= 180 ? 'text-red-700' :
+                          item.DaysNoMovement >= 90 ? 'text-orange-600' :
+                          item.DaysNoMovement >= 60 ? 'text-yellow-600' :
+                          'text-gray-900'
+                        }`}>
+                          {item.DaysNoMovement}
+                        </span>
+                      </td>
+
+                      {/* Sprzedaż 90 dni */}
+                      <td className="px-3 py-2 whitespace-nowrap text-right">
+                        <span className={`text-sm ${
+                          item.IloscSprzedana90dni === 0 ? 'text-red-600 font-medium' : 'text-gray-900'
+                        }`}>
+                          {formatNumber(item.IloscSprzedana90dni || 0, 0)}
+                        </span>
+                      </td>
+
+                      {/* Dni zapasu */}
+                      <td className="px-3 py-2 whitespace-nowrap text-right">
+                        <span className={`text-sm font-medium ${
+                          item.DniZapasu === null || item.DniZapasu === undefined ? 'text-red-600' :
+                          item.DniZapasu >= 365 ? 'text-red-600' :
+                          item.DniZapasu >= 180 ? 'text-orange-600' :
+                          item.DniZapasu >= 90 ? 'text-yellow-600' :
+                          'text-green-600'
+                        }`}>
+                          {item.DniZapasu !== null && item.DniZapasu !== undefined
+                            ? (item.DniZapasu >= 9999 ? '∞' : formatNumber(item.DniZapasu, 0))
+                            : '∞'}
+                        </span>
+                      </td>
+
+                      {/* Ostatnia sprzedaż */}
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        <span className="text-xs text-gray-600">
+                          {item.OstatniaSprzedaz
+                            ? item.OstatniaSprzedaz
+                            : (item.DaysNoMovement >= 365 ? 'Ponad rok temu' : 'Brak')}
+                        </span>
+                      </td>
+
+                      {/* Rekomendacja */}
+                      <td className="px-3 py-2">
+                        <p className="text-xs text-gray-700 max-w-xs" title={item.Recommendation}>
+                          {item.Recommendation?.length > 80
+                            ? item.Recommendation.substring(0, 80) + '...'
+                            : item.Recommendation}
+                        </p>
+                      </td>
+                    </tr>
+                  );
+                })}
+            </tbody>
+          </table>
+        </div>
+
+        {filteredItems.length > 50 && (
+          <div className="p-4 text-center text-sm text-gray-500 border-t">
+            Wyświetlono 50 z {filteredItems.length} produktów. Użyj filtrów lub wyszukiwarki aby zawęzić wyniki.
+          </div>
+        )}
+
+        {filteredItems.length === 0 && (
+          <div className="p-8 text-center text-gray-500">
+            <Package className="w-12 h-12 mx-auto mb-3 text-gray-300" />
+            <p>Brak produktów spełniających kryteria</p>
           </div>
         )}
       </div>
@@ -915,6 +1037,93 @@ function DeadStock() {
           type={toast.type}
           onClose={() => setToast(null)}
         />
+      )}
+
+      {/* Przycisk pomocy */}
+      <button
+        onClick={() => setShowHelp(true)}
+        className="fixed bottom-6 right-6 w-14 h-14 bg-primary-600 hover:bg-primary-700 text-white rounded-full shadow-lg flex items-center justify-center transition-all hover:scale-110 z-40"
+        title="Pomoc"
+      >
+        <HelpCircle className="w-7 h-7" />
+      </button>
+
+      {/* Modal pomocy */}
+      {showHelp && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 bg-white border-b px-6 py-4 flex items-center justify-between rounded-t-2xl">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 bg-red-100 rounded-lg flex items-center justify-center">
+                  <HelpCircle className="w-6 h-6 text-red-600" />
+                </div>
+                <h2 className="text-xl font-bold text-gray-900">Martwe Stany - Pomoc</h2>
+              </div>
+              <button onClick={() => setShowHelp(false)} className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+            <div className="p-6 space-y-6">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">Do czego sluzy ten widok?</h3>
+                <p className="text-gray-600">
+                  Widok Martwe Stany Magazynowe pozwala identyfikowac produkty o niskiej rotacji, ktore zamrazaja kapital
+                  i zajmuja miejsce w magazynie. Pomaga podejmowac decyzje o promocjach, wyprzedazach lub likwidacji zapasow.
+                </p>
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-3">Glowne funkcjonalnosci:</h3>
+                <div className="space-y-3">
+                  <div className="flex items-start space-x-3 p-3 bg-red-50 rounded-lg">
+                    <AlertTriangle className="w-5 h-5 text-red-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Kategorie rotacji</p>
+                      <p className="text-sm text-gray-600">DEAD (brak sprzedazy), VERY_SLOW (ponad 365 dni zapasu), SLOW (180-365 dni), NORMAL, FAST, VERY_FAST.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-pink-50 rounded-lg">
+                    <XCircle className="w-5 h-5 text-pink-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Bledy zakupu</p>
+                      <p className="text-sm text-gray-600">Identyfikacja produktow kupionych ponownie mimo braku sprzedazy.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-green-50 rounded-lg">
+                    <DollarSign className="w-5 h-5 text-green-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Zamrozony kapital</p>
+                      <p className="text-sm text-gray-600">Wartosc produktow bez rotacji - kapital, ktory mozna odzyskac.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-blue-50 rounded-lg">
+                    <Filter className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Zaawansowane filtry</p>
+                      <p className="text-sm text-gray-600">Filtrowanie po markach, rodzajach, grupach, magazynach. Mozliwosc zapisywania filtrow.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-purple-50 rounded-lg">
+                    <Calendar className="w-5 h-5 text-purple-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Dni bez ruchu</p>
+                      <p className="text-sm text-gray-600">Liczba dni od ostatniej sprzedazy - kluczowy wskaznik rotacji.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h4 className="font-medium text-gray-900 mb-2">Wskazowka</h4>
+                <p className="text-sm text-gray-600">
+                  Skup sie najpierw na produktach oznaczonych jako "BLAD ZAKUPU" i "DEAD" - to one generuja najwieksze straty.
+                  Uzyj filtra "Min. wartość zamrożona" aby znalezc najdrozsze produkty do likwidacji.
+                </p>
+              </div>
+            </div>
+            <div className="sticky bottom-0 bg-gray-50 px-6 py-4 border-t rounded-b-2xl">
+              <button onClick={() => setShowHelp(false)} className="w-full btn-primary">Rozumiem</button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

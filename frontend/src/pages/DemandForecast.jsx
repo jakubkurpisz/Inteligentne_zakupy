@@ -1,4 +1,5 @@
-import { Brain, Calendar, TrendingUp, AlertCircle, CheckCircle } from 'lucide-react'
+import { useState } from 'react'
+import { Brain, Calendar, TrendingUp, AlertCircle, CheckCircle, HelpCircle, X } from 'lucide-react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Area, AreaChart } from 'recharts'
 
 const forecastData = [
@@ -58,6 +59,8 @@ const seasonalEvents = [
 ]
 
 function DemandForecast() {
+  const [showHelp, setShowHelp] = useState(false);
+
   return (
     <div className="space-y-6">
       {/* Nagłówek */}
@@ -255,6 +258,86 @@ function DemandForecast() {
           </ul>
         </div>
       </div>
+
+      {/* Przycisk pomocy */}
+      <button
+        onClick={() => setShowHelp(true)}
+        className="fixed bottom-6 right-6 w-14 h-14 bg-primary-600 hover:bg-primary-700 text-white rounded-full shadow-lg flex items-center justify-center transition-all hover:scale-110 z-40"
+        title="Pomoc"
+      >
+        <HelpCircle className="w-7 h-7" />
+      </button>
+
+      {/* Modal pomocy */}
+      {showHelp && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 bg-white border-b px-6 py-4 flex items-center justify-between rounded-t-2xl">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center">
+                  <HelpCircle className="w-6 h-6 text-green-600" />
+                </div>
+                <h2 className="text-xl font-bold text-gray-900">Prognozowanie Popytu - Pomoc</h2>
+              </div>
+              <button onClick={() => setShowHelp(false)} className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+            <div className="p-6 space-y-6">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">Do czego sluzy ten widok?</h3>
+                <p className="text-gray-600">
+                  Widok Prognozowanie Popytu wykorzystuje sztuczna inteligencje do przewidywania przyszlego zapotrzebowania
+                  na produkty. Pomaga planowac zakupy i unikac brakow towarowych.
+                </p>
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-3">Glowne funkcjonalnosci:</h3>
+                <div className="space-y-3">
+                  <div className="flex items-start space-x-3 p-3 bg-green-50 rounded-lg">
+                    <Brain className="w-5 h-5 text-green-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Model AI</p>
+                      <p className="text-sm text-gray-600">Zaawansowane algorytmy (ARIMA, Prophet, XGBoost) analizujace wzorce sprzedazy.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-blue-50 rounded-lg">
+                    <TrendingUp className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Wykresy prognoz</p>
+                      <p className="text-sm text-gray-600">Wizualizacja przewidywanej sprzedazy z przedzialem ufnosci.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-orange-50 rounded-lg">
+                    <Calendar className="w-5 h-5 text-orange-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Wydarzenia sezonowe</p>
+                      <p className="text-sm text-gray-600">Uwzglednianie swiat, promocji i wydarzen wplywajacych na popyt.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-red-50 rounded-lg">
+                    <AlertCircle className="w-5 h-5 text-red-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Alerty i rekomendacje</p>
+                      <p className="text-sm text-gray-600">Automatyczne ostrzezenia o produktach wymagajacych uzupelnienia.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h4 className="font-medium text-gray-900 mb-2">Wskazowka</h4>
+                <p className="text-sm text-gray-600">
+                  Zwracaj uwage na produkty oznaczone jako "KRYTYCZNE" (czerwone) - wymagaja natychmiastowego dzialania.
+                  Wskaznik pewnosci informuje o wiarygodnosci prognozy.
+                </p>
+              </div>
+            </div>
+            <div className="sticky bottom-0 bg-gray-50 px-6 py-4 border-t rounded-b-2xl">
+              <button onClick={() => setShowHelp(false)} className="w-full btn-primary">Rozumiem</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

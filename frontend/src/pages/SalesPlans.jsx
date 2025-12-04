@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react'
-import { RefreshCw, Calendar, TrendingUp, DollarSign, AlertCircle } from 'lucide-react'
+import React, { useState, useEffect, useRef } from 'react'
+import { Calendar, TrendingUp, DollarSign, AlertCircle, HelpCircle, X, Warehouse } from 'lucide-react'
 import {
   LineChart,
   Line,
@@ -13,6 +13,18 @@ import {
   ResponsiveContainer
 } from 'recharts'
 import { API_BASE_URL } from '../config/api'
+
+// Cache helpers
+const CACHE_KEYS = { plans: 'salesPlans_plans_cache', summary: 'salesPlans_summary_cache' };
+const getFromCache = (key, defaultValue) => {
+  try {
+    const cached = localStorage.getItem(key);
+    return cached ? JSON.parse(cached) : defaultValue;
+  } catch { return defaultValue; }
+};
+const saveToCache = (key, value) => {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+};
 
 // Funkcja formatująca liczby w stylu polskim
 const formatNumber = (num) => {
@@ -32,30 +44,41 @@ const formatCurrency = (num) => {
 }
 
 function SalesPlans() {
-  const [plans, setPlans] = useState([])
-  const [summary, setSummary] = useState(null)
+  const [plans, setPlans] = useState(() => getFromCache(CACHE_KEYS.plans, []))
+  const [summary, setSummary] = useState(() => getFromCache(CACHE_KEYS.summary, {
+    total_gls: 0,
+    total_4f: 0,
+    total_jeans: 0,
+    total_all: 0,
+    avg_daily_gls: 0,
+    avg_daily_4f: 0,
+    avg_daily_jeans: 0,
+    avg_daily_all: 0
+  }))
   const [loading, setLoading] = useState(false)
-  const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState(null)
   const [filters, setFilters] = useState({
     startDate: '',
     endDate: '',
     view: 'month' // 'all', 'month', 'week' - domyślnie aktualny miesiąc
   })
+  const hasFetchedRef = useRef(false)
+  const lastFetchParamsRef = useRef('')
+  const [showHelp, setShowHelp] = useState(false)
 
-  // Pobierz dane planów
-  const fetchPlans = async (sync = false) => {
+  // Pobierz dane planów z konkretnymi parametrami (bez użycia stanu filters)
+  const fetchPlansWithParams = async (startDate, endDate, sync = false) => {
     setLoading(true)
     setError(null)
 
     try {
       let url = `${API_BASE_URL}/api/sales-plans?sync=${sync}`
 
-      if (filters.startDate) {
-        url += `&start_date=${filters.startDate}`
+      if (startDate) {
+        url += `&start_date=${startDate}`
       }
-      if (filters.endDate) {
-        url += `&end_date=${filters.endDate}`
+      if (endDate) {
+        url += `&end_date=${endDate}`
       }
 
       const response = await fetch(url)
@@ -69,6 +92,8 @@ function SalesPlans() {
       if (data.success) {
         setPlans(data.plans)
         setSummary(data.summary)
+        saveToCache(CACHE_KEYS.plans, data.plans)
+        saveToCache(CACHE_KEYS.summary, data.summary)
       } else {
         throw new Error('Nie udało się pobrać planów')
       }
@@ -80,38 +105,13 @@ function SalesPlans() {
     }
   }
 
-  // Synchronizuj dane z Google Sheets
-  const handleSync = async () => {
-    setRefreshing(true)
-
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/sales-plans/sync`, {
-        method: 'POST'
-      })
-
-      if (!response.ok) {
-        throw new Error('Błąd podczas synchronizacji danych')
-      }
-
-      const data = await response.json()
-
-      if (data.success) {
-        // Po synchronizacji, pobierz nowe dane
-        await fetchPlans(false)
-      } else {
-        throw new Error(data.message || 'Nie udało się zsynchronizować danych')
-      }
-    } catch (err) {
-      setError(err.message)
-      console.error('Błąd synchronizacji:', err)
-    } finally {
-      setRefreshing(false)
-    }
+  // Pobierz dane planów (używa aktualnych filtrów)
+  const fetchPlans = async (sync = false) => {
+    await fetchPlansWithParams(filters.startDate, filters.endDate, sync)
   }
 
-  // Przy montowaniu komponentu - zastosuj domyślny filtr (aktualny miesiąc)
+  // Przy montowaniu komponentu - zastosuj domyślny filtr (aktualny miesiąc) i pobierz dane
   useEffect(() => {
-    // Wywołaj applyViewFilter() - to ustawi daty i wywoła fetchPlans przez drugi useEffect
     const today = new Date()
     const monthStart = new Date(today.getFullYear(), today.getMonth(), 1)
     const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0)
@@ -121,38 +121,36 @@ function SalesPlans() {
       const year = d.getFullYear()
       return `${day}.${month}.${year}`
     }
-    setFilters(prev => ({ ...prev, startDate: formatDate(monthStart), endDate: formatDate(monthEnd) }))
+    const startDate = formatDate(monthStart)
+    const endDate = formatDate(monthEnd)
+    setFilters(prev => ({ ...prev, startDate, endDate }))
+
+    // Pobierz dane tylko raz przy montowaniu (jeśli nie ma cache lub w tle)
+    if (!hasFetchedRef.current) {
+      hasFetchedRef.current = true
+      lastFetchParamsRef.current = `${startDate}-${endDate}`
+      fetchPlansWithParams(startDate, endDate)
+    }
   }, [])
 
-  // Przygotuj dane do wykresów
+  // Przygotuj dane do wykresów (posortowane rosnąco po dacie)
   const prepareChartData = () => {
-    return plans.map(plan => ({
+    // Parsuj datę z formatu DD.MM.YYYY
+    const parseDate = (dateStr) => {
+      const [day, month, year] = dateStr.split('.')
+      return new Date(year, month - 1, day)
+    }
+
+    // Sortuj rosnąco po dacie
+    const sortedPlans = [...plans].sort((a, b) => parseDate(a.date) - parseDate(b.date))
+
+    return sortedPlans.map(plan => ({
       date: plan.date,
       GLS: plan.gls,
       '4F': plan.four_f,
       JEANS: plan.jeans,
       RAZEM: plan.total
     }))
-  }
-
-  // Zastosuj filtry widoku
-  const applyViewFilter = () => {
-    const today = new Date()
-
-    if (filters.view === 'week') {
-      const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000)
-      const startDate = formatDateForFilter(weekAgo)
-      const endDate = formatDateForFilter(today)
-      setFilters({ ...filters, startDate, endDate })
-    } else if (filters.view === 'month') {
-      const monthStart = new Date(today.getFullYear(), today.getMonth(), 1)
-      const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0)
-      const startDate = formatDateForFilter(monthStart)
-      const endDate = formatDateForFilter(monthEnd)
-      setFilters({ ...filters, startDate, endDate })
-    } else {
-      setFilters({ ...filters, startDate: '', endDate: '' })
-    }
   }
 
   const formatDateForFilter = (date) => {
@@ -162,17 +160,53 @@ function SalesPlans() {
     return `${day}.${month}.${year}`
   }
 
-  useEffect(() => {
-    if (filters.view !== 'all') {
-      applyViewFilter()
-    }
-  }, [filters.view])
+  // Reaguj na zmianę widoku (tydzień/miesiąc/wszystkie) - tylko gdy użytkownik zmienia filtr
+  const handleViewChange = (newView) => {
+    const today = new Date()
+    let startDate = ''
+    let endDate = ''
 
-  useEffect(() => {
-    if (filters.startDate || filters.endDate) {
-      fetchPlans()
+    if (newView === 'week') {
+      const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000)
+      startDate = formatDateForFilter(weekAgo)
+      endDate = formatDateForFilter(today)
+    } else if (newView === 'month') {
+      const monthStart = new Date(today.getFullYear(), today.getMonth(), 1)
+      const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0)
+      startDate = formatDateForFilter(monthStart)
+      endDate = formatDateForFilter(monthEnd)
     }
-  }, [filters.startDate, filters.endDate])
+
+    setFilters({ view: newView, startDate, endDate })
+
+    // Pobierz dane tylko jeśli parametry się zmieniły
+    const newParams = `${startDate}-${endDate}`
+    if (newParams !== lastFetchParamsRef.current) {
+      lastFetchParamsRef.current = newParams
+      fetchPlansWithParams(startDate, endDate)
+    }
+  }
+
+  // Reaguj na ręczną zmianę dat - tylko gdy użytkownik wpisuje daty
+  const handleDateChange = (field, value) => {
+    const newFilters = { ...filters, [field]: value, view: 'all' }
+    setFilters(newFilters)
+
+    // Pobierz dane po zmianie dat (z debounce przez setTimeout)
+    const newStartDate = field === 'startDate' ? value : filters.startDate
+    const newEndDate = field === 'endDate' ? value : filters.endDate
+    const newParams = `${newStartDate}-${newEndDate}`
+
+    if (newParams !== lastFetchParamsRef.current && (newStartDate || newEndDate)) {
+      lastFetchParamsRef.current = newParams
+      // Użyj setTimeout żeby nie fetchować przy każdym naciśnięciu klawisza
+      setTimeout(() => {
+        if (lastFetchParamsRef.current === newParams) {
+          fetchPlansWithParams(newStartDate, newEndDate)
+        }
+      }, 500)
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -180,20 +214,8 @@ function SalesPlans() {
       <div className="flex justify-between items-center">
         <div>
           <h1 className="text-3xl font-bold text-gray-900">Plany Sprzedażowe</h1>
-          <p className="text-gray-600 mt-1">Zarządzanie planami sprzedaży z Google Sheets</p>
+          <p className="text-gray-600 mt-1">Dane synchronizowane automatycznie co 30 minut</p>
         </div>
-        <button
-          onClick={handleSync}
-          disabled={refreshing}
-          className={`flex items-center space-x-2 px-4 py-2 rounded-lg font-medium transition-colors ${
-            refreshing
-              ? 'bg-gray-300 text-gray-600 cursor-not-allowed'
-              : 'bg-primary-600 text-white hover:bg-primary-700'
-          }`}
-        >
-          <RefreshCw className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} />
-          <span>{refreshing ? 'Synchronizacja...' : 'Synchronizuj z Google Sheets'}</span>
-        </button>
       </div>
 
       {/* Komunikaty o błędach */}
@@ -208,8 +230,7 @@ function SalesPlans() {
       )}
 
       {/* Statystyki główne */}
-      {summary && (
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-lg shadow p-6 text-white">
             <div className="flex items-center justify-between">
               <div>
@@ -262,7 +283,6 @@ function SalesPlans() {
             </div>
           </div>
         </div>
-      )}
 
       {/* Filtry */}
       <div className="bg-white rounded-lg shadow p-4">
@@ -274,7 +294,7 @@ function SalesPlans() {
 
           <select
             value={filters.view}
-            onChange={(e) => setFilters({ ...filters, view: e.target.value })}
+            onChange={(e) => handleViewChange(e.target.value)}
             className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
           >
             <option value="all">Wszystkie dane</option>
@@ -290,7 +310,7 @@ function SalesPlans() {
             type="text"
             placeholder="Data od (DD.MM.YYYY)"
             value={filters.startDate}
-            onChange={(e) => setFilters({ ...filters, startDate: e.target.value, view: 'all' })}
+            onChange={(e) => handleDateChange('startDate', e.target.value)}
             className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
           />
 
@@ -298,7 +318,7 @@ function SalesPlans() {
             type="text"
             placeholder="Data do (DD.MM.YYYY)"
             value={filters.endDate}
-            onChange={(e) => setFilters({ ...filters, endDate: e.target.value, view: 'all' })}
+            onChange={(e) => handleDateChange('endDate', e.target.value)}
             className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
           />
         </div>
@@ -368,12 +388,7 @@ function SalesPlans() {
           <h2 className="text-xl font-bold text-gray-900">Szczegółowe Plany Dzienne</h2>
         </div>
 
-        {loading ? (
-          <div className="p-8 text-center">
-            <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600"></div>
-            <p className="text-gray-600 mt-2">Ładowanie danych...</p>
-          </div>
-        ) : plans.length === 0 ? (
+        {plans.length === 0 ? (
           <div className="p-8 text-center">
             <AlertCircle className="w-12 h-12 text-gray-400 mx-auto mb-2" />
             <p className="text-gray-600">Brak danych planów sprzedażowych</p>
@@ -421,29 +436,107 @@ function SalesPlans() {
                   </tr>
                 ))}
               </tbody>
-              {summary && (
-                <tfoot className="bg-gray-100 font-bold">
-                  <tr>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">SUMA</td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900">
-                      {formatCurrency(summary.total_gls)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900">
-                      {formatCurrency(summary.total_4f)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900">
-                      {formatCurrency(summary.total_jeans)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900">
-                      {formatCurrency(summary.total_all)}
-                    </td>
-                  </tr>
-                </tfoot>
-              )}
+              <tfoot className="bg-gray-100 font-bold">
+                <tr>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">SUMA</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900">
+                    {formatCurrency(summary.total_gls)}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900">
+                    {formatCurrency(summary.total_4f)}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900">
+                    {formatCurrency(summary.total_jeans)}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900">
+                    {formatCurrency(summary.total_all)}
+                  </td>
+                </tr>
+              </tfoot>
             </table>
           </div>
         )}
       </div>
+
+      {/* Przycisk pomocy */}
+      <button
+        onClick={() => setShowHelp(true)}
+        className="fixed bottom-6 right-6 w-14 h-14 bg-primary-600 hover:bg-primary-700 text-white rounded-full shadow-lg flex items-center justify-center transition-all hover:scale-110 z-40"
+        title="Pomoc"
+      >
+        <HelpCircle className="w-7 h-7" />
+      </button>
+
+      {/* Modal pomocy */}
+      {showHelp && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 bg-white border-b px-6 py-4 flex items-center justify-between rounded-t-2xl">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 bg-orange-100 rounded-lg flex items-center justify-center">
+                  <HelpCircle className="w-6 h-6 text-orange-600" />
+                </div>
+                <h2 className="text-xl font-bold text-gray-900">Plany Sprzedazowe - Pomoc</h2>
+              </div>
+              <button onClick={() => setShowHelp(false)} className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+            <div className="p-6 space-y-6">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">Do czego sluzy ten widok?</h3>
+                <p className="text-gray-600">
+                  Widok Plany Sprzedazowe prezentuje dzienne plany sprzedazy dla poszczegolnych magazynow (GLS, 4F, JEANS).
+                  Dane sa synchronizowane automatycznie co 30 minut z arkusza Google.
+                </p>
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-3">Glowne funkcjonalnosci:</h3>
+                <div className="space-y-3">
+                  <div className="flex items-start space-x-3 p-3 bg-blue-50 rounded-lg">
+                    <DollarSign className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Sumy planow</p>
+                      <p className="text-sm text-gray-600">Laczne wartosci planow sprzedazy dla kazdego magazynu oraz srednie dzienne.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-green-50 rounded-lg">
+                    <Calendar className="w-5 h-5 text-green-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Filtrowanie po datach</p>
+                      <p className="text-sm text-gray-600">Wybor okresu: ostatni tydzien, aktualny miesiac lub dowolny zakres dat.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-purple-50 rounded-lg">
+                    <TrendingUp className="w-5 h-5 text-purple-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Wykresy trendow</p>
+                      <p className="text-sm text-gray-600">Wizualizacja planow w postaci wykresow liniowych i slupkowych.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-orange-50 rounded-lg">
+                    <Warehouse className="w-5 h-5 text-orange-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Porownanie magazynow</p>
+                      <p className="text-sm text-gray-600">Tabela szczegolowych planow dziennych z podsumowaniem.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h4 className="font-medium text-gray-900 mb-2">Wskazowka</h4>
+                <p className="text-sm text-gray-600">
+                  Dane sa pobierane z arkusza Google Sheets. Mozesz zmieniac zakres dat aby analizowac rozne okresy.
+                  Wykres liniowy pokazuje trend, a slupkowy pozwala porownac magazyny.
+                </p>
+              </div>
+            </div>
+            <div className="sticky bottom-0 bg-gray-50 px-6 py-4 border-t rounded-b-2xl">
+              <button onClick={() => setShowHelp(false)} className="w-full btn-primary">Rozumiem</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

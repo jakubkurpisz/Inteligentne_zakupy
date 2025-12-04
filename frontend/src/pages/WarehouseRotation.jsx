@@ -1,14 +1,33 @@
 import React, { useState, useEffect } from 'react'
-import { DollarSign, Package, TrendingUp, TrendingDown, AlertTriangle, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react'
+import { DollarSign, Package, TrendingUp, TrendingDown, AlertTriangle, RefreshCw, ChevronDown, ChevronUp, HelpCircle, X, Clock } from 'lucide-react'
 import { BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import { API_BASE_URL } from '../config/api'
 
+// Cache helpers
+const CACHE_KEY = 'warehouseRotation_cache';
+const getFromCache = (defaultValue) => {
+  try {
+    const cached = localStorage.getItem(CACHE_KEY);
+    return cached ? JSON.parse(cached) : defaultValue;
+  } catch { return defaultValue; }
+};
+const saveToCache = (value) => {
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify(value)); } catch {}
+};
+
 function WarehouseRotation() {
   const API_URL = API_BASE_URL;
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [rotationData, setRotationData] = useState(null);
+  const [rotationData, setRotationData] = useState(() => getFromCache({
+    total_warehouse_value: 0,
+    total_products: 0,
+    categories: [],
+    recommendations: [],
+    top_products_by_category: {}
+  }));
   const [expandedCategories, setExpandedCategories] = useState(['DEAD', 'VERY_SLOW', 'SLOW']);
+  const [showHelp, setShowHelp] = useState(false);
 
   useEffect(() => {
     fetchRotationData();
@@ -23,6 +42,7 @@ function WarehouseRotation() {
       }
       const data = await response.json();
       setRotationData(data);
+      saveToCache(data);
       setError(null);
     } catch (err) {
       console.error('Błąd podczas pobierania danych rotacji:', err);
@@ -100,15 +120,6 @@ function WarehouseRotation() {
     return new Intl.NumberFormat('pl-PL').format(value);
   };
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <RefreshCw className="w-8 h-8 animate-spin text-primary-600" />
-        <span className="ml-3 text-lg text-gray-600">Ładowanie danych rotacji magazynu...</span>
-      </div>
-    );
-  }
-
   if (error) {
     return (
       <div className="bg-red-50 border border-red-200 rounded-lg p-4">
@@ -123,9 +134,6 @@ function WarehouseRotation() {
     );
   }
 
-  if (!rotationData) {
-    return null;
-  }
 
   // Przygotowanie danych dla wykresu kołowego
   const pieData = rotationData.categories.map(cat => ({
@@ -410,6 +418,93 @@ function WarehouseRotation() {
           );
         })}
       </div>
+
+      {/* Przycisk pomocy */}
+      <button
+        onClick={() => setShowHelp(true)}
+        className="fixed bottom-6 right-6 w-14 h-14 bg-primary-600 hover:bg-primary-700 text-white rounded-full shadow-lg flex items-center justify-center transition-all hover:scale-110 z-40"
+        title="Pomoc"
+      >
+        <HelpCircle className="w-7 h-7" />
+      </button>
+
+      {/* Modal pomocy */}
+      {showHelp && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 bg-white border-b px-6 py-4 flex items-center justify-between rounded-t-2xl">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 bg-indigo-100 rounded-lg flex items-center justify-center">
+                  <HelpCircle className="w-6 h-6 text-indigo-600" />
+                </div>
+                <h2 className="text-xl font-bold text-gray-900">Rotacja Magazynu - Pomoc</h2>
+              </div>
+              <button onClick={() => setShowHelp(false)} className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+            <div className="p-6 space-y-6">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">Do czego sluzy ten widok?</h3>
+                <p className="text-gray-600">
+                  Widok Rotacja Magazynu analizuje szybkosc sprzedazy produktow i identyfikuje zamrozony kapital.
+                  Pomaga optymalizowac zapasy i podejmowac decyzje o przecenach.
+                </p>
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-3">Kategorie rotacji:</h3>
+                <div className="space-y-3">
+                  <div className="flex items-start space-x-3 p-3 bg-green-50 rounded-lg">
+                    <TrendingUp className="w-5 h-5 text-green-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">VERY_FAST / FAST</p>
+                      <p className="text-sm text-gray-600">Produkty o wysokiej rotacji - zapas na mniej niz 90 dni. Idealna sytuacja.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-blue-50 rounded-lg">
+                    <Package className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">NORMAL</p>
+                      <p className="text-sm text-gray-600">Produkty ze standardowa rotacja - zapas na 90-180 dni.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-yellow-50 rounded-lg">
+                    <Clock className="w-5 h-5 text-yellow-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">SLOW / VERY_SLOW</p>
+                      <p className="text-sm text-gray-600">Produkty o niskiej rotacji - zapas na ponad 180 dni. Rozważ promocje.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-red-50 rounded-lg">
+                    <AlertTriangle className="w-5 h-5 text-red-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">DEAD</p>
+                      <p className="text-sm text-gray-600">Produkty bez sprzedazy - calkowicie zamrozony kapital. Wymagaja natychmiastowej akcji.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-purple-50 rounded-lg">
+                    <DollarSign className="w-5 h-5 text-purple-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Zamrozony kapital</p>
+                      <p className="text-sm text-gray-600">Wartosc produktow o niskiej rotacji - pieniadze "zamrozone" w magazynie.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h4 className="font-medium text-gray-900 mb-2">Wskazowka</h4>
+                <p className="text-sm text-gray-600">
+                  Kliknij na kategorie aby rozwinac liste produktow. Skup sie na produktach DEAD i VERY_SLOW -
+                  to one generuja najwieksze straty. Rozważ przeceny lub likwidacje.
+                </p>
+              </div>
+            </div>
+            <div className="sticky bottom-0 bg-gray-50 px-6 py-4 border-t rounded-b-2xl">
+              <button onClick={() => setShowHelp(false)} className="w-full btn-primary">Rozumiem</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

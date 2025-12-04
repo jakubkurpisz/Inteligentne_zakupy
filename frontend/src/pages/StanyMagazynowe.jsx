@@ -1,22 +1,37 @@
 import React, { useState, useEffect, useMemo } from 'react'
-import { Package, Search, Filter, Download, TrendingUp, AlertCircle, Warehouse, ChevronDown, ChevronUp } from 'lucide-react'
+import { Package, Search, Filter, TrendingUp, AlertCircle, Warehouse, ChevronDown, ChevronUp, HelpCircle, X, DollarSign } from 'lucide-react'
 import { BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import { API_BASE_URL } from '../config/api'
 
+// Cache helpers
+const CACHE_KEY = 'stanyMagazynowe_cache';
+const getFromCache = (key, defaultValue) => {
+  try {
+    const cached = localStorage.getItem(CACHE_KEY);
+    if (!cached) return defaultValue;
+    const parsed = JSON.parse(cached);
+    return parsed[key] !== undefined ? parsed[key] : defaultValue;
+  } catch { return defaultValue; }
+};
+const saveAllToCache = (values) => {
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify(values)); } catch {}
+};
+
 function StanyMagazynowe() {
   const API_URL = API_BASE_URL;
-  const [products, setProducts] = useState([]);
-  const [filteredProducts, setFilteredProducts] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [products, setProducts] = useState(() => getFromCache('products', []));
+  const [filteredProducts, setFilteredProducts] = useState(() => getFromCache('products', []));
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
-  const [stats, setStats] = useState(null);
-  const [categoryData, setCategoryData] = useState([]);
+  const [stats, setStats] = useState(() => getFromCache('stats', null));
+  const [categoryData, setCategoryData] = useState(() => getFromCache('categoryData', []));
   const [selectedMagazyny, setSelectedMagazyny] = useState(['1', '7', '9']);
   const [sortConfig, setSortConfig] = useState({ key: 'Stan', direction: 'desc' });
-  const [seasonalityData, setSeasonalityData] = useState({});
+  const [seasonalityData, setSeasonalityData] = useState(() => getFromCache('seasonalityData', {}));
   const [seasonalityLoading, setSeasonalityLoading] = useState(true);
-  const [warehouseTotals, setWarehouseTotals] = useState(null);
+  const [warehouseTotals, setWarehouseTotals] = useState(() => getFromCache('warehouseTotals', null));
+  const [showHelp, setShowHelp] = useState(false);
 
   // Mapowanie magazynów
   const magazyny = {
@@ -94,6 +109,14 @@ function StanyMagazynowe() {
         setFilteredProducts(productsWithStan);
         setWarehouseTotals(data.totals);
         processProductData(productsWithStan);
+        // Save to cache
+        saveAllToCache({
+          products: productsWithStan,
+          warehouseTotals: data.totals,
+          stats: getFromCache('stats', null),
+          seasonalityData: getFromCache('seasonalityData', {}),
+          categoryData: getFromCache('categoryData', [])
+        });
       }
     } catch (error) {
       setError(error);
@@ -111,6 +134,9 @@ function StanyMagazynowe() {
       }
       const data = await response.json();
       setStats(data);
+      // Update cache
+      const current = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}');
+      saveAllToCache({ ...current, stats: data });
     } catch (error) {
       console.error("Błąd podczas pobierania statystyk:", error);
     }
@@ -126,6 +152,9 @@ function StanyMagazynowe() {
       const data = await response.json();
       if (data.success) {
         setSeasonalityData(data.data);
+        // Update cache
+        const current = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}');
+        saveAllToCache({ ...current, seasonalityData: data.data });
       }
     } catch (error) {
       console.error("Błąd podczas pobierania danych sezonowości:", error);
@@ -279,10 +308,6 @@ function StanyMagazynowe() {
     });
   }, [filteredProducts, sortConfig]);
 
-  if (loading) {
-    return <div className="text-center text-lg font-medium">Ładowanie danych...</div>;
-  }
-
   if (error) {
     return <div className="text-center text-lg font-medium text-red-600">Błąd: {error.message}</div>;
   }
@@ -299,10 +324,6 @@ function StanyMagazynowe() {
           <button className="btn-secondary flex items-center space-x-2">
             <Filter className="w-4 h-4" />
             <span>Filtruj</span>
-          </button>
-          <button className="btn-primary flex items-center space-x-2">
-            <Download className="w-4 h-4" />
-            <span>Eksportuj</span>
           </button>
         </div>
       </div>
@@ -572,6 +593,93 @@ function StanyMagazynowe() {
           </div>
         </div>
       </div>
+
+      {/* Przycisk pomocy */}
+      <button
+        onClick={() => setShowHelp(true)}
+        className="fixed bottom-6 right-6 w-14 h-14 bg-primary-600 hover:bg-primary-700 text-white rounded-full shadow-lg flex items-center justify-center transition-all hover:scale-110 z-40"
+        title="Pomoc"
+      >
+        <HelpCircle className="w-7 h-7" />
+      </button>
+
+      {/* Modal pomocy */}
+      {showHelp && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 bg-white border-b px-6 py-4 flex items-center justify-between rounded-t-2xl">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 bg-teal-100 rounded-lg flex items-center justify-center">
+                  <HelpCircle className="w-6 h-6 text-teal-600" />
+                </div>
+                <h2 className="text-xl font-bold text-gray-900">Stany Magazynowe - Pomoc</h2>
+              </div>
+              <button onClick={() => setShowHelp(false)} className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+            <div className="p-6 space-y-6">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">Do czego sluzy ten widok?</h3>
+                <p className="text-gray-600">
+                  Widok Stany Magazynowe prezentuje aktualne stany produktow na wszystkich magazynach.
+                  Umozliwia analize wartosci zapasow i ich rozklad wedlug kategorii.
+                </p>
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-3">Glowne funkcjonalnosci:</h3>
+                <div className="space-y-3">
+                  <div className="flex items-start space-x-3 p-3 bg-teal-50 rounded-lg">
+                    <Warehouse className="w-5 h-5 text-teal-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Filtrowanie po magazynach</p>
+                      <p className="text-sm text-gray-600">Wybor jednego lub wielu magazynow do analizy (GLS, JEANS, INNE, GLS DEPOZYT).</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-blue-50 rounded-lg">
+                    <Search className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Wyszukiwanie produktow</p>
+                      <p className="text-sm text-gray-600">Szukaj po nazwie, symbolu lub marce produktu.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-green-50 rounded-lg">
+                    <DollarSign className="w-5 h-5 text-green-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Wartosci magazynowe</p>
+                      <p className="text-sm text-gray-600">Wartosc zakupu (netto) i wartosc sprzedazy (brutto) dla kazdego produktu i laczna.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-purple-50 rounded-lg">
+                    <TrendingUp className="w-5 h-5 text-purple-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Sezonowość produktów</p>
+                      <p className="text-sm text-gray-600">Badge sezonowosci (STABILNY, ZMIENNY, SEZONOWY) na podstawie analizy sprzedazy.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-orange-50 rounded-lg">
+                    <Package className="w-5 h-5 text-orange-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Sortowanie i tabela</p>
+                      <p className="text-sm text-gray-600">Kliknij naglowek kolumny aby posortowac dane. Wyswietlane jest 100 produktow.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h4 className="font-medium text-gray-900 mb-2">Wskazowka</h4>
+                <p className="text-sm text-gray-600">
+                  Uzyj wyszukiwarki aby znalezc konkretny produkt. Mozesz sortowac tabele klikajac w naglowki kolumn.
+                  Wykresy pokazuja rozklad wartosci i ilosci wedlug kategorii.
+                </p>
+              </div>
+            </div>
+            <div className="sticky bottom-0 bg-gray-50 px-6 py-4 border-t rounded-b-2xl">
+              <button onClick={() => setShowHelp(false)} className="w-full btn-primary">Rozumiem</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

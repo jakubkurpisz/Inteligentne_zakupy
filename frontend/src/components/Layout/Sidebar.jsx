@@ -38,11 +38,6 @@ const menuStructure = [
         path: '/sales-plans',
         icon: Calendar,
         label: 'Plany Sprzedażowe'
-      },
-      {
-        path: '/demand-forecast',
-        icon: LineChart,
-        label: 'Prognozowanie'
       }
     ]
   },
@@ -82,19 +77,8 @@ const menuStructure = [
         path: '/purchase-proposals',
         icon: ClipboardList,
         label: 'Suplementy'
-      },
-      {
-        path: '/purchase-suggestions',
-        icon: ShoppingCart,
-        label: 'Koordynowanie Zakupów'
       }
     ]
-  },
-  {
-    type: 'item',
-    path: '/settings',
-    icon: Settings,
-    label: 'Ustawienia'
   }
 ]
 

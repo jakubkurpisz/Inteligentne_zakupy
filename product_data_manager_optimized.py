@@ -1,4 +1,4 @@
-import pymssql
+import pyodbc
 from datetime import datetime, date
 from decimal import Decimal
 import time
@@ -10,6 +10,19 @@ import os
 import sqlite3
 from dotenv import load_dotenv
 from pathlib import Path
+
+
+def get_sql_connection():
+    """Tworzy połączenie z SQL Server używając pyodbc."""
+    conn_str = (
+        f'DRIVER={{ODBC Driver 18 for SQL Server}};'
+        f'SERVER={os.getenv("SQL_SERVER", "10.101.101.5").split(chr(92))[0]};'
+        f'DATABASE={os.getenv("SQL_DATABASE")};'
+        f'UID={os.getenv("SQL_USERNAME")};'
+        f'PWD={os.getenv("SQL_PASSWORD")};'
+        f'TrustServerCertificate=yes'
+    )
+    return pyodbc.connect(conn_str, timeout=30)
 
 load_dotenv()
 
@@ -436,16 +449,8 @@ def upload_sql_data_to_sqlite():
 
     print(f"\n[SQL Server] Laczenie z baza danych...")
     try:
-        server_ip = server.split('\\')[0]
-        connection = pymssql.connect(
-            server=server_ip,
-            port=1433,
-            user=username,
-            password=password,
-            database=database,
-            login_timeout=30
-        )
-    except pymssql.Error as conn_err:
+        connection = get_sql_connection()
+    except pyodbc.Error as conn_err:
         print(f"Blad polaczenia z SQL Server: {conn_err}")
         raise
 
@@ -598,16 +603,8 @@ def sync_sales_history():
     print("\n[Historia Sprzedaży] Łączenie z bazą danych SQL Server...")
 
     try:
-        server_ip = server.split('\\')[0]
-        connection = pymssql.connect(
-            server=server_ip,
-            port=1433,
-            user=username,
-            password=password,
-            database=database,
-            login_timeout=30
-        )
-    except pymssql.Error as conn_err:
+        connection = get_sql_connection()
+    except pyodbc.Error as conn_err:
         print(f"[Historia Sprzedaży] Błąd połączenia: {str(conn_err)}")
         return
 
@@ -725,25 +722,17 @@ def get_detailed_product_rotation():
     """
     try:
         print("\n[Rotacja Dostaw] Łączenie z bazą danych SQL Server...")
-        server = os.getenv("SQL_SERVER", "10.101.101.5\\INSERTGT")
-        server_ip = server.split('\\')[0]
-        connection = pymssql.connect(
-            server=server_ip,
-            port=1433,
-            user=os.getenv("SQL_USERNAME"),
-            password=os.getenv("SQL_PASSWORD"),
-            database=os.getenv("SQL_DATABASE"),
-            login_timeout=30
-        )
+        connection = get_sql_connection()
         cursor_sql = connection.cursor()
 
-        # Pobierz pierwszą datę sprzedaży dla każdego produktu (jako proxy dla daty wprowadzenia)
+        # Pobierz dostawy (PZ/PW) z ostatniego roku dla każdego produktu
+        # To pozwoli nam obliczyć dni bez ruchu od ostatniej dostawy, jeśli brak sprzedaży
         deliveries_query = """
         SELECT
             tw.tw_Symbol AS Symbol,
-            MIN(d.dok_DataWyst) AS DataDostawy,
-            1 AS Ilosc,
-            0 AS DokumentId
+            d.dok_DataWyst AS DataDostawy,
+            dp.ob_IloscMag AS Ilosc,
+            d.dok_Id AS DokumentId
         FROM
             dok__Dokument d
         INNER JOIN
@@ -751,17 +740,19 @@ def get_detailed_product_rotation():
         INNER JOIN
             tw__Towar tw ON dp.ob_TowId = tw.tw_Id
         WHERE
-            d.dok_Typ IN (10, 11)  -- Paragon i Faktura sprzedaży
-            AND d.dok_MagId IN (1, 7, 9)
+            (d.dok_NrPelny LIKE 'PZ%' OR d.dok_NrPelny LIKE 'PW%')  -- Dokumenty zakupu (przyjęcie zewnętrzne/wewnętrzne)
+            AND d.dok_MagId IN (1, 2, 3, 7, 9)
             AND d.dok_Status <> 2
-        GROUP BY
-            tw.tw_Symbol
+            AND dp.ob_IloscMag > 0
+            AND CAST(d.dok_DataWyst AS DATE) >= DATEADD(day, -365, CAST(GETDATE() AS DATE))
+        ORDER BY
+            tw.tw_Symbol, d.dok_DataWyst
         """
 
         cursor_sql.execute(deliveries_query)
         deliveries = cursor_sql.fetchall()
 
-        print(f"[Rotacja Dostaw] Pobrano {len(deliveries)} produktów z historią sprzedaży")
+        print(f"[Rotacja Dostaw] Pobrano {len(deliveries)} rekordów dostaw (PZ/PW)")
 
         # Grupuj dostawy po produktach
         # Kolumny: Symbol(0), DataDostawy(1), Ilosc(2), DokumentId(3)
@@ -919,16 +910,7 @@ def sync_product_dates_from_pz():
     """
     try:
         print("\n[Daty produktów] Łączenie z bazą danych SQL Server...")
-        server = os.getenv("SQL_SERVER", "10.101.101.5\\INSERTGT")
-        server_ip = server.split('\\')[0]
-        connection = pymssql.connect(
-            server=server_ip,
-            port=1433,
-            user=os.getenv("SQL_USERNAME"),
-            password=os.getenv("SQL_PASSWORD"),
-            database=os.getenv("SQL_DATABASE"),
-            login_timeout=30
-        )
+        connection = get_sql_connection()
         cursor_sql = connection.cursor()
 
         # Pobierz MIN(DataWystawienia) dla każdego produktu z dokumentów sprzedaży
@@ -1056,23 +1038,15 @@ def compute_dead_stock_analysis():
     password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
 
     try:
-        server_ip = server.split('\\')[0]
-        sql_connection = pymssql.connect(
-            server=server_ip,
-            port=1433,
-            user=username,
-            password=password,
-            database=database,
-            login_timeout=30
-        )
-    except pymssql.Error as conn_err:
+        sql_connection = get_sql_connection()
+    except pyodbc.Error as conn_err:
         print(f"[Dead Stock Analysis] Błąd połączenia z SQL Server: {conn_err}")
         conn_sqlite.close()
         return
 
     sql_cursor = sql_connection.cursor()
 
-    # Zapytanie SQL do pobierania sprzedaży z ostatnich 365 dni
+    # Zapytanie SQL do pobierania sprzedaży - osobno dla ilości rocznej i daty ostatniej sprzedaży
     mag_id_filter = "1,2,3,7,9"
     sales_query = f"""
     WITH FilteredTowar AS (
@@ -1081,29 +1055,56 @@ def compute_dead_stock_analysis():
             tw_Symbol
         FROM
             tw__Towar
+    ),
+    -- Sprzedaż z ostatnich 365 dni (dla obliczeń rotacji)
+    YearlySales AS (
+        SELECT
+            ob_TowId,
+            SUM(CASE
+                    WHEN dok_Typ IN (14, 6) THEN -ob_IloscMag
+                    ELSE ob_IloscMag
+                END) AS IloscSprzedana,
+            SUM(CASE
+                    WHEN dok_Typ IN (14, 6) THEN -ob_WartBrutto
+                    ELSE ob_WartBrutto
+                END) AS WartoscSprzedazy
+        FROM
+            vwZstSprzWgKhnt
+        WHERE
+            CAST(dok_DataWyst AS DATE) >= DATEADD(day, -365, CAST(GETDATE() AS DATE))
+            AND dok_MagId IN ({mag_id_filter})
+            AND dok_Podtyp <> 1
+            AND dok_Status <> 2
+        GROUP BY
+            ob_TowId
+    ),
+    -- Ostatnia sprzedaż z CAŁEJ historii (dla obliczenia dni bez ruchu)
+    LastSale AS (
+        SELECT
+            ob_TowId,
+            MAX(dok_DataWyst) AS OstatniaSprzedaz
+        FROM
+            vwZstSprzWgKhnt
+        WHERE
+            dok_MagId IN ({mag_id_filter})
+            AND dok_Podtyp <> 1
+            AND dok_Status <> 2
+        GROUP BY
+            ob_TowId
     )
     SELECT
-        MAX(FilteredTowar.tw_Symbol) AS Symbol,
-        SUM(CASE
-                WHEN dok_Typ IN (14, 6) THEN -ob_IloscMag
-                ELSE ob_IloscMag
-            END) AS IloscSprzedana,
-        SUM(CASE
-                WHEN dok_Typ IN (14, 6) THEN -ob_WartBrutto
-                ELSE ob_WartBrutto
-            END) AS WartoscSprzedazy,
-        MAX(dok_DataWyst) AS OstatniaSprzedaz
+        FilteredTowar.tw_Symbol AS Symbol,
+        COALESCE(YearlySales.IloscSprzedana, 0) AS IloscSprzedana,
+        COALESCE(YearlySales.WartoscSprzedazy, 0) AS WartoscSprzedazy,
+        LastSale.OstatniaSprzedaz
     FROM
-        vwZstSprzWgKhnt
+        FilteredTowar
     LEFT JOIN
-        FilteredTowar ON ob_TowId = FilteredTowar.tw_Id
+        YearlySales ON FilteredTowar.tw_Id = YearlySales.ob_TowId
+    LEFT JOIN
+        LastSale ON FilteredTowar.tw_Id = LastSale.ob_TowId
     WHERE
-        CAST(dok_DataWyst AS DATE) >= DATEADD(day, -365, CAST(GETDATE() AS DATE))
-        AND dok_MagId IN ({mag_id_filter})
-        AND dok_Podtyp <> 1
-        AND dok_Status <> 2
-    GROUP BY
-        ob_TowId
+        YearlySales.ob_TowId IS NOT NULL OR LastSale.ob_TowId IS NOT NULL
     """
 
     try:
@@ -1165,15 +1166,62 @@ def compute_dead_stock_analysis():
         avg_daily_sales = yearly_sales_qty / 365.0 if yearly_sales_qty > 0 else 0
 
         # Oblicz Days of No Movement
+        # Priorytet: ostatnia sprzedaż > ostatnia dostawa (zakup)
         last_activity_date = None
+        has_sales = False
+        last_stan_change = product_dict.get('LastStanChange')  # Inicjalizacja przed użyciem
 
         if sales_info["OstatniaSprzedaz"]:
             try:
                 last_activity_date = datetime.strptime(sales_info["OstatniaSprzedaz"], '%Y-%m-%d')
+                has_sales = True
             except (ValueError, TypeError):
                 pass
 
-        last_stan_change = product_dict.get('LastStanChange')
+        # Jeśli brak sprzedaży, użyj daty OSTATNIEJ dostawy (zakupu) jako punktu odniesienia
+        # Pobieramy dane o dostawach z product_deliveries (obliczone wcześniej)
+        if not has_sales:
+            # Pobierz dane rotacji dla tego produktu
+            delivery_data_for_days = product_deliveries.get(symbol, {})
+
+            # Wyciągnij listę dostaw
+            if isinstance(delivery_data_for_days, dict):
+                deliveries_for_days = delivery_data_for_days.get('deliveries', [])
+            else:
+                deliveries_for_days = delivery_data_for_days if delivery_data_for_days else []
+
+            # Znajdź datę OSTATNIEJ dostawy (nie pierwszej!)
+            if deliveries_for_days:
+                deliveries_sorted_for_days = sorted(deliveries_for_days, key=lambda x: x['date'])
+                last_delivery = deliveries_sorted_for_days[-1]  # Ostatnia dostawa
+                last_delivery_date = last_delivery['date']
+
+                # Konwertuj do datetime jeśli to date
+                if isinstance(last_delivery_date, date) and not isinstance(last_delivery_date, datetime):
+                    last_activity_date = datetime.combine(last_delivery_date, datetime.min.time())
+                elif isinstance(last_delivery_date, datetime):
+                    last_activity_date = last_delivery_date
+                else:
+                    # Spróbuj sparsować string
+                    for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d']:
+                        try:
+                            last_activity_date = datetime.strptime(str(last_delivery_date), fmt)
+                            break
+                        except (ValueError, TypeError):
+                            continue
+
+            # Fallback na DateAdded jeśli nie ma danych o dostawach
+            if not last_activity_date:
+                date_added_str = product_dict.get('DateAdded')
+                if date_added_str:
+                    for fmt in ['%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d']:
+                        try:
+                            last_activity_date = datetime.strptime(date_added_str, fmt)
+                            break
+                        except (ValueError, TypeError):
+                            continue
+
+        # Fallback na LastStanChange tylko jeśli nie ma żadnych innych dat
         if not last_activity_date and last_stan_change:
             try:
                 last_activity_date = datetime.strptime(last_stan_change, '%Y-%m-%dT%H:%M:%S.%f')
@@ -1189,6 +1237,10 @@ def compute_dead_stock_analysis():
         if last_activity_date:
             days_no_movement = (today - last_activity_date).days
         else:
+            days_no_movement = 365
+
+        # Ogranicz do maksymalnie 365 dni (365+ = brak ruchu ponad rok)
+        if days_no_movement > 365:
             days_no_movement = 365
 
         # Oblicz zamrożony kapitał
@@ -1323,30 +1375,26 @@ def compute_dead_stock_analysis():
             sales_after_last_delivery == 0 and
             product_age_days > 30):  # Daj produkt 30 dni na wdrożenie
 
-            days_since_zero = days_since_last_zero if days_since_last_zero else 0
             category_label = "REPEATED_NO_SALES"
-            recommendation = f"BŁĄD POWTÓRNEGO ZAKUPU ({total_deliveries} dost., 0 sprzedaży po ostatniej, {days_since_zero}d od zera) - Nie zamawiaj ponownie!"
+            recommendation = "BŁĄD ZAKUPU - Nie zamawiaj ponownie!"
 
         # Produkty bardzo nowe (0-30 dni) - okres wdrożenia
         elif is_new_product:
             category_label = "NEW"
-            recommendation = "NOWY - Monitoruj przez 30 dni"
+            recommendation = "NOWY - Monitoruj"
 
         # Produkty 1-3 miesięczne (30-90 dni) - okres testowy
         elif product_age_days <= 90:
-            # Informacja o liczbie dostaw dla kontekstu
-            delivery_info = f" ({total_deliveries} dost.)" if total_deliveries > 1 else ""
-
             # Dla stosunkowo nowych produktów (30-90 dni) sprawdź czy w ogóle się sprzedają
             if yearly_sales_qty == 0:
                 category_label = "NEW_NO_SALES"
-                recommendation = f"NOWY BEZ SPRZEDAŻY ({product_age_days}d{delivery_info}) - Pilna akcja marketingowa!"
+                recommendation = "NOWY BEZ SPRZEDAŻY - Pilna akcja marketingowa!"
             elif days_of_stock <= 90:
                 category_label = "NEW_SELLING"
-                recommendation = f"NOWY, SPRZEDAJE SIĘ ({product_age_days}d{delivery_info}) - Dobrze, kontynuuj"
+                recommendation = "NOWY, SPRZEDAJE SIĘ - OK"
             else:
                 category_label = "NEW_SLOW"
-                recommendation = f"NOWY, WOLNA SPRZEDAŻ ({product_age_days}d{delivery_info}) - Rozważ promocję"
+                recommendation = "NOWY, WOLNA SPRZEDAŻ - Rozważ promocję"
 
         # Produkty powyżej 3 miesięcy - normalna klasyfikacja według rotacji
         elif days_of_stock <= 30:
@@ -1354,7 +1402,7 @@ def compute_dead_stock_analysis():
             recommendation = "BARDZO SZYBKA ROTACJA - Zwiększ zamówienia"
         elif days_of_stock <= 90:
             category_label = "FAST"
-            recommendation = "SZYBKA ROTACJA - Utrzymuj obecne poziomy"
+            recommendation = "SZYBKA ROTACJA - Utrzymuj poziomy"
         elif days_of_stock <= 180:
             category_label = "NORMAL"
             recommendation = "NORMALNA ROTACJA - OK"
@@ -1366,10 +1414,7 @@ def compute_dead_stock_analysis():
             recommendation = "BARDZO WOLNA ROTACJA - Obniż ceny"
         else:
             category_label = "DEAD"
-            # Dla martwego zapasu pokaż wiek najstarszej dostawy
-            age_info = f"({oldest_delivery_age}d najst. dost.)" if oldest_delivery_age < 9999 else f"({product_age_days}d)"
-            delivery_info = f", {total_deliveries} dost." if total_deliveries > 1 else ""
-            recommendation = f"MARTWY ZAPAS {age_info}{delivery_info} - Wymaga natychmiastowej akcji"
+            recommendation = "MARTWY ZAPAS - Wymaga akcji"
 
         # Zapisz do tabeli
         cursor_sqlite.execute("""

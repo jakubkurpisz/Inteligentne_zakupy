@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -46,6 +47,31 @@ seasonality_cache = {
     "data": {},  # Słownik z kluczem = parametry zapytania
     "cache_duration": 1800  # 30 minut w sekundach
 }
+
+# ==================== GLOBALNY CACHE DANYCH ====================
+# Dane ładowane przy starcie serwera i aktualizowane w tle
+# Frontend otrzymuje natychmiastową odpowiedź z pamięci
+global_data_cache = {
+    "sales_data": {
+        "data": None,
+        "timestamp": None,
+        "loading": False
+    },
+    "dead_stock": {
+        "data": None,
+        "timestamp": None,
+        "loading": False
+    },
+    "sales_summary": {
+        "data": None,
+        "timestamp": None,
+        "loading": False
+    }
+}
+cache_refresh_lock = threading.Lock()
+
+# Kompresja GZIP - drastycznie przyspiesza transfer dużych JSON (~7MB -> ~700KB)
+app.add_middleware(GZipMiddleware, minimum_size=1000)  # Kompresuj odpowiedzi > 1KB
 
 # Konfiguracja CORS
 app.add_middleware(
@@ -326,6 +352,228 @@ def get_db_connection():
     return conn
 
 
+# ==================== FUNKCJE ŁADOWANIA CACHE ====================
+
+def load_sales_data_to_cache():
+    """Ładuje dane sprzedażowe do cache"""
+    global global_data_cache
+    try:
+        print("[CACHE] Ładowanie sales_data do cache...")
+        global_data_cache["sales_data"]["loading"] = True
+
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM products")
+        rows = cursor.fetchall()
+        conn.close()
+
+        data = [dict(row) for row in rows]
+
+        with cache_refresh_lock:
+            global_data_cache["sales_data"]["data"] = data
+            global_data_cache["sales_data"]["timestamp"] = datetime.now()
+            global_data_cache["sales_data"]["loading"] = False
+
+        print(f"[CACHE] Załadowano {len(data)} rekordów do sales_data cache")
+        return True
+    except Exception as e:
+        print(f"[CACHE ERROR] Błąd ładowania sales_data: {e}")
+        global_data_cache["sales_data"]["loading"] = False
+        return False
+
+
+def load_dead_stock_to_cache():
+    """Ładuje dane dead stock do cache"""
+    global global_data_cache
+    try:
+        print("[CACHE] Ładowanie dead_stock do cache...")
+        global_data_cache["dead_stock"]["loading"] = True
+
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # Pobierz wszystkie dane z tabeli dead_stock_analysis
+        cursor.execute("SELECT * FROM dead_stock_analysis ORDER BY DaysNoMovement DESC")
+        rows = cursor.fetchall()
+        columns = [description[0] for description in cursor.description]
+
+        items = []
+        for row in rows:
+            item_dict = dict(zip(columns, row))
+            items.append(item_dict)
+
+        # Oblicz statystyki kategorii
+        cursor.execute("""
+            SELECT
+                Category,
+                COUNT(*) as count,
+                SUM(FrozenValue) as total_value
+            FROM dead_stock_analysis
+            GROUP BY Category
+        """)
+        category_stats_raw = cursor.fetchall()
+
+        category_stats = {
+            "NEW": 0, "NEW_NO_SALES": 0, "NEW_SELLING": 0, "NEW_SLOW": 0,
+            "REPEATED_NO_SALES": 0, "VERY_FAST": 0, "FAST": 0, "NORMAL": 0,
+            "SLOW": 0, "VERY_SLOW": 0, "DEAD": 0
+        }
+
+        total_frozen_value = 0
+        for cat_row in category_stats_raw:
+            cat_name = cat_row[0]
+            cat_count = cat_row[1]
+            cat_value = cat_row[2] or 0
+            if cat_name in category_stats:
+                category_stats[cat_name] = cat_count
+            total_frozen_value += cat_value
+
+        conn.close()
+
+        cache_data = {
+            "items": items,
+            "category_stats": category_stats,
+            "total_frozen_value": round(total_frozen_value, 2),
+            "total_items": len(items)
+        }
+
+        with cache_refresh_lock:
+            global_data_cache["dead_stock"]["data"] = cache_data
+            global_data_cache["dead_stock"]["timestamp"] = datetime.now()
+            global_data_cache["dead_stock"]["loading"] = False
+
+        print(f"[CACHE] Załadowano {len(items)} rekordów do dead_stock cache")
+        return True
+    except Exception as e:
+        print(f"[CACHE ERROR] Błąd ładowania dead_stock: {e}")
+        global_data_cache["dead_stock"]["loading"] = False
+        return False
+
+
+def load_sales_summary_to_cache():
+    """Ładuje podsumowanie sprzedaży do cache"""
+    global global_data_cache
+    try:
+        print("[CACHE] Ładowanie sales_summary do cache...")
+        global_data_cache["sales_summary"]["loading"] = True
+
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM products")
+        rows = cursor.fetchall()
+        conn.close()
+
+        # Przygotuj dane sprzedażowe
+        sales_data = []
+        for row in rows:
+            try:
+                data_sprzedazy = None
+                if row["DataSprzedazy"]:
+                    for fmt in ["%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d.%m.%Y"]:
+                        try:
+                            data_sprzedazy = datetime.strptime(row["DataSprzedazy"], fmt)
+                            break
+                        except ValueError:
+                            continue
+
+                if data_sprzedazy:
+                    sales_data.append({
+                        "DataSprzedazy": data_sprzedazy,
+                        "WartoscNetto": float(row["DetalicznaNetto"] or 0),
+                        "WartoscBrutto": float(row["DetalicznaBrutto"] or 0),
+                        "IloscSprzedana": float(row["Stan"] or 0),
+                    })
+            except (ValueError, TypeError):
+                continue
+
+        # Agregacja danych
+        summary = {"daily": {}, "weekly": {}, "monthly": {}, "yearly": {}}
+
+        for item in sales_data:
+            date = item["DataSprzedazy"]
+            year = date.year
+            week = date.isocalendar()[1]
+
+            # Dzienna
+            daily_key = date.strftime("%Y-%m-%d")
+            if daily_key not in summary["daily"]:
+                summary["daily"][daily_key] = {"date": daily_key, "totalNetto": 0, "totalBrutto": 0, "totalQuantity": 0}
+            summary["daily"][daily_key]["totalNetto"] += item["WartoscNetto"]
+            summary["daily"][daily_key]["totalBrutto"] += item["WartoscBrutto"]
+            summary["daily"][daily_key]["totalQuantity"] += item["IloscSprzedana"]
+
+            # Tygodniowa
+            weekly_key = f"{year}-W{week:02d}"
+            if weekly_key not in summary["weekly"]:
+                summary["weekly"][weekly_key] = {"week": weekly_key, "totalNetto": 0, "totalBrutto": 0, "totalQuantity": 0}
+            summary["weekly"][weekly_key]["totalNetto"] += item["WartoscNetto"]
+            summary["weekly"][weekly_key]["totalBrutto"] += item["WartoscBrutto"]
+            summary["weekly"][weekly_key]["totalQuantity"] += item["IloscSprzedana"]
+
+            # Miesięczna
+            monthly_key = date.strftime("%Y-%m")
+            if monthly_key not in summary["monthly"]:
+                summary["monthly"][monthly_key] = {"month": monthly_key, "totalNetto": 0, "totalBrutto": 0, "totalQuantity": 0}
+            summary["monthly"][monthly_key]["totalNetto"] += item["WartoscNetto"]
+            summary["monthly"][monthly_key]["totalBrutto"] += item["WartoscBrutto"]
+            summary["monthly"][monthly_key]["totalQuantity"] += item["IloscSprzedana"]
+
+            # Roczna
+            yearly_key = str(year)
+            if yearly_key not in summary["yearly"]:
+                summary["yearly"][yearly_key] = {"year": yearly_key, "totalNetto": 0, "totalBrutto": 0, "totalQuantity": 0}
+            summary["yearly"][yearly_key]["totalNetto"] += item["WartoscNetto"]
+            summary["yearly"][yearly_key]["totalBrutto"] += item["WartoscBrutto"]
+            summary["yearly"][yearly_key]["totalQuantity"] += item["IloscSprzedana"]
+
+        result = {
+            "daily": sorted(summary["daily"].values(), key=lambda x: x["date"], reverse=True),
+            "weekly": sorted(summary["weekly"].values(), key=lambda x: x["week"], reverse=True),
+            "monthly": sorted(summary["monthly"].values(), key=lambda x: x["month"], reverse=True),
+            "yearly": sorted(summary["yearly"].values(), key=lambda x: x["year"], reverse=True)
+        }
+
+        with cache_refresh_lock:
+            global_data_cache["sales_summary"]["data"] = result
+            global_data_cache["sales_summary"]["timestamp"] = datetime.now()
+            global_data_cache["sales_summary"]["loading"] = False
+
+        print(f"[CACHE] Załadowano sales_summary do cache")
+        return True
+    except Exception as e:
+        print(f"[CACHE ERROR] Błąd ładowania sales_summary: {e}")
+        global_data_cache["sales_summary"]["loading"] = False
+        return False
+
+
+def refresh_all_cache():
+    """Odświeża wszystkie dane w cache (uruchamiane w tle)"""
+    print("[CACHE] Rozpoczynam odswiezanie wszystkich danych...")
+    load_sales_data_to_cache()
+    load_dead_stock_to_cache()
+    print("[CACHE] Zakonczono odswiezanie wszystkich danych")
+
+
+def init_cache_on_startup():
+    """Inicjalizuje cache przy starcie serwera"""
+    print("\n" + "="*60)
+    print("[CACHE] INICJALIZACJA CACHE PRZY STARCIE SERWERA")
+    print("="*60)
+
+    # Ładuj dane w osobnym wątku aby nie blokować startu
+    def load_all():
+        load_sales_data_to_cache()
+        load_dead_stock_to_cache()
+        print("[CACHE] Wszystkie dane zaladowane do cache")
+
+    thread = threading.Thread(target=load_all)
+    thread.start()
+    print("[CACHE] Uruchomiono ladowanie danych w tle...")
+
+
 @app.get("/api/server-info")
 async def get_server_info():
     """Zwraca informacje o serwerze - IP i port"""
@@ -335,6 +583,44 @@ async def get_server_info():
         "port": 5555,
         "api_url": f"http://{local_ip}:5555",
         "message": "Backend API - Inteligentne Zakupy"
+    }
+
+
+@app.get("/api/cache-status")
+async def get_cache_status():
+    """
+    Zwraca status wszystkich cache w pamięci.
+    Pozwala monitorować czy dane są załadowane i jak stare.
+    """
+    now = datetime.now()
+    status = {}
+
+    for cache_name, cache_info in global_data_cache.items():
+        if cache_info["timestamp"]:
+            age_seconds = (now - cache_info["timestamp"]).total_seconds()
+            status[cache_name] = {
+                "loaded": cache_info["data"] is not None,
+                "loading": cache_info["loading"],
+                "timestamp": cache_info["timestamp"].isoformat(),
+                "age_seconds": round(age_seconds),
+                "age_human": f"{int(age_seconds // 60)}m {int(age_seconds % 60)}s",
+                "records": len(cache_info["data"]) if isinstance(cache_info["data"], list) else (
+                    len(cache_info["data"].get("items", [])) if isinstance(cache_info["data"], dict) and "items" in cache_info["data"] else "N/A"
+                )
+            }
+        else:
+            status[cache_name] = {
+                "loaded": False,
+                "loading": cache_info["loading"],
+                "timestamp": None,
+                "age_seconds": None,
+                "records": 0
+            }
+
+    return {
+        "cache_status": status,
+        "server_time": now.isoformat(),
+        "next_refresh": "co 5 minut automatycznie"
     }
 
 
@@ -358,17 +644,33 @@ async def root():
 
 
 @app.get("/api/sales-data")
-async def get_sales_data():
-    """Pobiera wszystkie dane produktów z bazy danych"""
+async def get_sales_data(force_refresh: bool = False):
+    """
+    Pobiera wszystkie dane produktów z cache (natychmiastowa odpowiedź).
+    Dane są ładowane przy starcie serwera i aktualizowane w tle.
+    """
+    # Jeśli cache jest dostępny, zwróć natychmiast
+    if global_data_cache["sales_data"]["data"] is not None and not force_refresh:
+        cache_age = (datetime.now() - global_data_cache["sales_data"]["timestamp"]).total_seconds()
+        print(f"[CACHE HIT] sales-data - wiek cache: {cache_age:.0f}s")
+        return global_data_cache["sales_data"]["data"]
+
+    # Jeśli cache nie jest dostępny lub wymuszono odświeżenie, załaduj synchronicznie
     try:
+        print("[CACHE MISS] sales-data - ładowanie z bazy...")
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM products")
         rows = cursor.fetchall()
         conn.close()
 
-        # Konwertuj Row objects na słowniki
         data = [dict(row) for row in rows]
+
+        # Zapisz do cache
+        with cache_refresh_lock:
+            global_data_cache["sales_data"]["data"] = data
+            global_data_cache["sales_data"]["timestamp"] = datetime.now()
+
         return data
 
     except sqlite3.Error as e:
@@ -1366,11 +1668,12 @@ async def get_dead_stock(
     marka: Optional[str] = None,
     rotation_status: Optional[str] = None,  # NEW, VERY_FAST, FAST, NORMAL, SLOW, VERY_SLOW, DEAD
     sort_by: Optional[str] = "frozen_value",
-    mag_ids: Optional[str] = None  # Unused for now - all warehouses included in cache
+    mag_ids: Optional[str] = None,
+    force_refresh: bool = False
 ):
     """
-    ZOPTYMALIZOWANY endpoint - czyta z pre-computed cache (tabela dead_stock_analysis).
-    Cache jest aktualizowany co 5 minut przez scheduled task w product_data_manager_optimized.py.
+    ZOPTYMALIZOWANY endpoint - czyta z pamięci cache (natychmiastowa odpowiedź).
+    Dane są ładowane przy starcie serwera i aktualizowane w tle.
 
     Parametry:
     - min_days: Minimum dni bez ruchu
@@ -1381,40 +1684,85 @@ async def get_dead_stock(
     - sort_by: Sortowanie (days_no_movement, frozen_value, dni_zapasu)
     """
 
+    # Sprawdź czy mamy dane w cache
+    cache_data = global_data_cache["dead_stock"]["data"]
+
+    if cache_data is not None and not force_refresh:
+        cache_age = (datetime.now() - global_data_cache["dead_stock"]["timestamp"]).total_seconds()
+        print(f"[CACHE HIT] dead-stock - wiek cache: {cache_age:.0f}s")
+
+        # Filtruj dane z cache w pamięci
+        items = cache_data["items"]
+
+        # Zastosuj filtry
+        if min_days > 0:
+            items = [i for i in items if i.get('DaysNoMovement', 0) >= min_days]
+        if min_value > 0:
+            items = [i for i in items if i.get('FrozenValue', 0) >= min_value]
+        if category:
+            items = [i for i in items if i.get('Rodzaj') == category]
+        if marka:
+            items = [i for i in items if i.get('Marka') == marka]
+        if rotation_status:
+            items = [i for i in items if i.get('Category', '').upper() == rotation_status.upper()]
+
+        # Sortowanie
+        sort_key_map = {
+            "days_no_movement": lambda x: x.get('DaysNoMovement', 0),
+            "frozen_value": lambda x: x.get('FrozenValue', 0),
+            "dni_zapasu": lambda x: x.get('DniZapasu', 0)
+        }
+        sort_func = sort_key_map.get(sort_by, sort_key_map["frozen_value"])
+        items = sorted(items, key=sort_func, reverse=True)
+
+        # Oblicz średnią
+        avg_days = sum(item.get('DaysNoMovement', 0) for item in items) / len(items) if items else 0
+
+        return {
+            "total_items": len(items),
+            "total_frozen_value": cache_data["total_frozen_value"],
+            "avg_days_no_movement": round(avg_days, 1),
+            "category_stats": cache_data["category_stats"],
+            "filters": {
+                "min_days": min_days,
+                "min_value": min_value,
+                "category": category,
+                "sort_by": sort_by,
+                "mag_ids": mag_ids or "1,2,7,9"
+            },
+            "items": items,
+            "cache_info": {
+                "last_update": global_data_cache["dead_stock"]["timestamp"].isoformat() if global_data_cache["dead_stock"]["timestamp"] else None,
+                "is_cached": True,
+                "cache_age_seconds": round(cache_age)
+            }
+        }
+
+    # Fallback do bazy danych jeśli cache pusty
     try:
+        print("[CACHE MISS] dead-stock - ładowanie z bazy...")
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Buduj SQL query z filtrami
         sql_query = "SELECT * FROM dead_stock_analysis WHERE 1=1"
         params = []
 
-        # Filtr: minimum dni bez ruchu
         if min_days > 0:
             sql_query += " AND DaysNoMovement >= ?"
             params.append(min_days)
-
-        # Filtr: minimalna wartość zamrożonego kapitału
         if min_value > 0:
             sql_query += " AND FrozenValue >= ?"
             params.append(min_value)
-
-        # Filtr: kategoria (Rodzaj produktu)
         if category:
             sql_query += " AND Rodzaj = ?"
             params.append(category)
-
-        # Filtr: marka
         if marka:
             sql_query += " AND Marka = ?"
             params.append(marka)
-
-        # Filtr: status rotacji
         if rotation_status:
             sql_query += " AND Category = ?"
             params.append(rotation_status.upper())
 
-        # Sortowanie
         sort_column = {
             "days_no_movement": "DaysNoMovement DESC",
             "frozen_value": "FrozenValue DESC",
@@ -1423,55 +1771,32 @@ async def get_dead_stock(
 
         sql_query += f" ORDER BY {sort_column}"
 
-        # Wykonaj zapytanie
         cursor.execute(sql_query, params)
         rows = cursor.fetchall()
         columns = [description[0] for description in cursor.description]
 
-        # Konwertuj do listy słowników
-        items = []
-        for row in rows:
-            item_dict = dict(zip(columns, row))
-            items.append(item_dict)
+        items = [dict(zip(columns, row)) for row in rows]
 
-        # Oblicz statystyki
         cursor.execute("""
-            SELECT
-                Category,
-                COUNT(*) as count,
-                SUM(FrozenValue) as total_value
-            FROM dead_stock_analysis
-            GROUP BY Category
+            SELECT Category, COUNT(*) as count, SUM(FrozenValue) as total_value
+            FROM dead_stock_analysis GROUP BY Category
         """)
         category_stats_raw = cursor.fetchall()
 
         category_stats = {
-            "NEW": 0,
-            "NEW_NO_SALES": 0,
-            "NEW_SELLING": 0,
-            "NEW_SLOW": 0,
-            "REPEATED_NO_SALES": 0,
-            "VERY_FAST": 0,
-            "FAST": 0,
-            "NORMAL": 0,
-            "SLOW": 0,
-            "VERY_SLOW": 0,
-            "DEAD": 0
+            "NEW": 0, "NEW_NO_SALES": 0, "NEW_SELLING": 0, "NEW_SLOW": 0,
+            "REPEATED_NO_SALES": 0, "VERY_FAST": 0, "FAST": 0, "NORMAL": 0,
+            "SLOW": 0, "VERY_SLOW": 0, "DEAD": 0
         }
 
         total_frozen_value = 0
         for cat_row in category_stats_raw:
-            cat_name = cat_row[0]
-            cat_count = cat_row[1]
-            cat_value = cat_row[2] or 0
-            category_stats[cat_name] = cat_count
+            cat_name, cat_count, cat_value = cat_row[0], cat_row[1], cat_row[2] or 0
+            if cat_name in category_stats:
+                category_stats[cat_name] = cat_count
             total_frozen_value += cat_value
 
-        # Oblicz średnią dni bez ruchu dla przefiltrowanych produktów
-        if items:
-            avg_days = sum(item.get('DaysNoMovement', 0) for item in items) / len(items)
-        else:
-            avg_days = 0
+        avg_days = sum(item.get('DaysNoMovement', 0) for item in items) / len(items) if items else 0
 
         conn.close()
 
@@ -1490,7 +1815,7 @@ async def get_dead_stock(
             "items": items,
             "cache_info": {
                 "last_update": items[0].get('LastAnalysisUpdate') if items else None,
-                "is_cached": True
+                "is_cached": False
             }
         }
 
@@ -1699,21 +2024,21 @@ async def get_store_metrics():
     - Wejścia
     - Sztuki
 
-    Dane 4F są w komórkach B120:C125 (6 wierszy):
-    0: PARAGONY
-    1: UPT
-    2: KONWERSJA
-    3: WYNIK
-    4: WEJSCIA
-    5: SZTUKI
+    Dane 4F są w komórkach B123:C128 (6 wierszy):
+    0: WYNIK
+    1: WEJSCIA
+    2: SZTUKI
+    3: PARAGONY
+    4: UPT
+    5: KONWERSJA
 
     GLS i JEANS pobierają dane z bazy SQL (dashboard-stats).
     """
     try:
         SHEET_ID = "1j1hBF_QfN5wL1f2jUO4HKUlbPy_W914cDaHgUWZP2cI"
         SHEET_NAME = "PANEL_ZARZADZANIA"
-        # Pobierz TYLKO zakres B120:C125 który zawiera dane 4F (6 wierszy)
-        url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet={SHEET_NAME}&range=B120:C125"
+        # Pobierz TYLKO zakres B123:C128 który zawiera dane 4F (6 wierszy)
+        url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet={SHEET_NAME}&range=B123:C128"
 
         response = requests.get(url, timeout=10)
         response.raise_for_status()
@@ -1734,9 +2059,9 @@ async def get_store_metrics():
             except:
                 return 0
 
-        # Struktura danych 4F (6 wierszy):
-        # 0: PARAGONY, 1: UPT, 2: KONWERSJA, 3: WYNIK, 4: WEJSCIA, 5: SZTUKI
-        metric_names = ['paragony', 'upt', 'konwersja', 'wynik', 'wejscia', 'sztuki']
+        # Struktura danych 4F (6 wierszy) - kolejność z arkusza:
+        # 0: WYNIK, 1: WEJSCIA, 2: SZTUKI, 3: PARAGONY, 4: UPT, 5: KONWERSJA
+        metric_names = ['wynik', 'wejscia', 'sztuki', 'paragony', 'upt', 'konwersja']
 
         store_4f = {"jednostka": "4F"}
 
@@ -3532,13 +3857,14 @@ async def remove_ignored_product(symbol: str):
 # FOOTFALL - Pobieranie wejść z systemu AGIS
 # ============================================
 
-# Cache dla wejść (aktualizowane co godzinę)
+# Cache dla wejść (aktualizowane w tle przez scheduler)
 footfall_cache = {
     "gls": None,
     "jns": None,
     "timestamp": None,
     "jns_timestamp": None,
-    "cache_duration": 300  # 5 minut w sekundach
+    "cache_duration": 600,  # 10 minut w sekundach
+    "loading": False  # Czy trwa odświeżanie w tle
 }
 
 
@@ -3850,81 +4176,50 @@ def get_today_footfall(store: str = "GLS"):
 async def get_footfall(refresh: bool = False):
     """
     Pobiera liczbę wejść dla GLS z systemu AGIS oraz JNS z TopReports.
-    - refresh: jeśli True, wymusza pobranie nowych danych
 
-    Dane są cachowane przez 5 minut.
+    WAŻNE: Ten endpoint NIGDY nie blokuje - zawsze zwraca dane natychmiast z cache lub bazy.
+    Dane są odświeżane w tle przez scheduler co 5 minut.
+
+    - refresh: parametr ignorowany (dane zawsze z cache/bazy, odświeżane w tle)
     """
     try:
         now = time.time()
         result_data = {}
         sources = {}
+        cache_ages = {}
 
-        # === GLS z AGIS ===
-        if not refresh and footfall_cache["timestamp"]:
-            cache_age = now - footfall_cache["timestamp"]
-            if cache_age < footfall_cache["cache_duration"] and footfall_cache["gls"] is not None:
-                result_data["GLS"] = footfall_cache["gls"]
-                sources["GLS"] = "cache"
-            else:
-                wejscia_gls = fetch_footfall_from_agis()
-                if wejscia_gls is not None:
-                    footfall_cache["gls"] = wejscia_gls
-                    footfall_cache["timestamp"] = now
-                    save_footfall_to_db(wejscia_gls, "GLS")
-                    result_data["GLS"] = wejscia_gls
-                    sources["GLS"] = "agis"
-                else:
-                    db_data = get_today_footfall("GLS")
-                    result_data["GLS"] = db_data["wejscia"]
-                    sources["GLS"] = "database"
+        # === GLS ===
+        if footfall_cache["gls"] is not None and footfall_cache["timestamp"]:
+            # Mamy dane w cache - zwracamy natychmiast
+            result_data["GLS"] = footfall_cache["gls"]
+            sources["GLS"] = "cache"
+            cache_ages["GLS"] = int(now - footfall_cache["timestamp"])
         else:
-            wejscia_gls = fetch_footfall_from_agis()
-            if wejscia_gls is not None:
-                footfall_cache["gls"] = wejscia_gls
-                footfall_cache["timestamp"] = now
-                save_footfall_to_db(wejscia_gls, "GLS")
-                result_data["GLS"] = wejscia_gls
-                sources["GLS"] = "agis"
-            else:
-                db_data = get_today_footfall("GLS")
-                result_data["GLS"] = db_data["wejscia"]
-                sources["GLS"] = "database"
+            # Brak cache - pobierz z bazy danych (szybkie)
+            db_data = get_today_footfall("GLS")
+            result_data["GLS"] = db_data["wejscia"]
+            sources["GLS"] = "database"
+            cache_ages["GLS"] = None
 
-        # === JNS z TopReports ===
-        if not refresh and footfall_cache["jns_timestamp"]:
-            cache_age_jns = now - footfall_cache["jns_timestamp"]
-            if cache_age_jns < footfall_cache["cache_duration"] and footfall_cache["jns"] is not None:
-                result_data["JNS"] = footfall_cache["jns"]
-                sources["JNS"] = "cache"
-            else:
-                wejscia_jns = fetch_footfall_jns_from_topreports()
-                if wejscia_jns is not None:
-                    footfall_cache["jns"] = wejscia_jns
-                    footfall_cache["jns_timestamp"] = now
-                    save_footfall_to_db(wejscia_jns, "JNS")
-                    result_data["JNS"] = wejscia_jns
-                    sources["JNS"] = "topreports"
-                else:
-                    db_data = get_today_footfall("JNS")
-                    result_data["JNS"] = db_data["wejscia"]
-                    sources["JNS"] = "database"
+        # === JNS ===
+        if footfall_cache["jns"] is not None and footfall_cache["jns_timestamp"]:
+            # Mamy dane w cache - zwracamy natychmiast
+            result_data["JNS"] = footfall_cache["jns"]
+            sources["JNS"] = "cache"
+            cache_ages["JNS"] = int(now - footfall_cache["jns_timestamp"])
         else:
-            wejscia_jns = fetch_footfall_jns_from_topreports()
-            if wejscia_jns is not None:
-                footfall_cache["jns"] = wejscia_jns
-                footfall_cache["jns_timestamp"] = now
-                save_footfall_to_db(wejscia_jns, "JNS")
-                result_data["JNS"] = wejscia_jns
-                sources["JNS"] = "topreports"
-            else:
-                db_data = get_today_footfall("JNS")
-                result_data["JNS"] = db_data["wejscia"]
-                sources["JNS"] = "database"
+            # Brak cache - pobierz z bazy danych (szybkie)
+            db_data = get_today_footfall("JNS")
+            result_data["JNS"] = db_data["wejscia"]
+            sources["JNS"] = "database"
+            cache_ages["JNS"] = None
 
         return {
             "success": True,
             "data": result_data,
             "sources": sources,
+            "cache_ages_seconds": cache_ages,
+            "background_refresh_active": footfall_cache["loading"],
             "timestamp": datetime.now().isoformat()
         }
 
@@ -3935,6 +4230,49 @@ async def get_footfall(refresh: bool = False):
             "error": str(e),
             "data": {"GLS": 0, "JNS": 0}
         }
+
+
+def refresh_footfall_background():
+    """
+    Odświeża dane footfall w tle (wywoływane przez scheduler).
+    Ta funkcja NIE blokuje API - dane są aktualizowane asynchronicznie.
+    """
+    global footfall_cache
+
+    if footfall_cache["loading"]:
+        print("[FOOTFALL BG] Pomijam - poprzednie odświeżanie jeszcze trwa")
+        return
+
+    footfall_cache["loading"] = True
+    print("[FOOTFALL BG] Rozpoczynam odświeżanie w tle...")
+
+    try:
+        # === GLS z AGIS (szybkie ~1-2s) ===
+        try:
+            wejscia_gls = fetch_footfall_from_agis()
+            if wejscia_gls is not None:
+                footfall_cache["gls"] = wejscia_gls
+                footfall_cache["timestamp"] = time.time()
+                save_footfall_to_db(wejscia_gls, "GLS")
+                print(f"[FOOTFALL BG] GLS zaktualizowane: {wejscia_gls}")
+        except Exception as e:
+            print(f"[FOOTFALL BG] Błąd GLS: {e}")
+
+        # === JNS z TopReports (wolne ~10-20s przez Selenium) ===
+        try:
+            wejscia_jns = fetch_footfall_jns_from_topreports()
+            if wejscia_jns is not None:
+                footfall_cache["jns"] = wejscia_jns
+                footfall_cache["jns_timestamp"] = time.time()
+                save_footfall_to_db(wejscia_jns, "JNS")
+                print(f"[FOOTFALL BG] JNS zaktualizowane: {wejscia_jns}")
+        except Exception as e:
+            print(f"[FOOTFALL BG] Błąd JNS: {e}")
+
+        print("[FOOTFALL BG] Odświeżanie zakończone")
+
+    finally:
+        footfall_cache["loading"] = False
 
 
 @app.post("/api/footfall/sync")
@@ -3985,6 +4323,10 @@ if __name__ == "__main__":
     print(f"Baza danych: {DATABASE_FILE}")
     print(f"Dokumentacja: http://localhost:{PORT}/docs")
 
+    # ==================== INICJALIZACJA CACHE ====================
+    # Ładuj dane do pamięci przy starcie serwera (w tle, nie blokuje startu)
+    init_cache_on_startup()
+
     # Skonfiguruj cykliczną synchronizację co godzinę (bez początkowej synchronizacji)
     scheduler.add_job(
         run_data_sync,
@@ -3993,8 +4335,48 @@ if __name__ == "__main__":
         name='Synchronizacja danych co godzinę',
         replace_existing=True
     )
+
+    # Synchronizacja planów sprzedaży z Google Sheets co 30 minut
+    scheduler.add_job(
+        sync_sales_plans_from_google,
+        trigger=IntervalTrigger(minutes=30),
+        id='sales_plans_sync_job',
+        name='Synchronizacja planów sprzedaży co 30 minut',
+        replace_existing=True
+    )
+
+    # Odświeżanie cache danych co 5 minut (dane w pamięci są zawsze świeże)
+    scheduler.add_job(
+        refresh_all_cache,
+        trigger=IntervalTrigger(minutes=5),
+        id='cache_refresh_job',
+        name='Odświeżanie cache danych co 5 minut',
+        replace_existing=True
+    )
+
+    # Odświeżanie footfall w tle co 5 minut (NIE BLOKUJE API!)
+    scheduler.add_job(
+        refresh_footfall_background,
+        trigger=IntervalTrigger(minutes=5),
+        id='footfall_refresh_job',
+        name='Odświeżanie footfall w tle co 5 minut',
+        replace_existing=True
+    )
+
+    # Początkowa synchronizacja planów sprzedaży przy starcie
+    print("\n[SYNC] Synchronizacja planów sprzedaży przy starcie...")
+    sync_sales_plans_from_google()
+
+    # Początkowe pobranie footfall w tle (nie blokuje startu serwera)
+    print("[SYNC] Rozpoczynam pobieranie footfall w tle...")
+    import threading
+    threading.Thread(target=refresh_footfall_background, daemon=True).start()
+
     scheduler.start()
     print(f"\n[OK] Zaplanowano automatyczną synchronizację danych co 1 godzinę")
+    print(f"[OK] Zaplanowano automatyczną synchronizację planów sprzedaży co 30 minut")
+    print(f"[OK] Zaplanowano odświeżanie cache co 5 minut")
+    print(f"[OK] Zaplanowano odświeżanie footfall w tle co 5 minut")
 
     print("\n" + "="*60)
     print(f"URUCHAMIANIE SERWERA API")

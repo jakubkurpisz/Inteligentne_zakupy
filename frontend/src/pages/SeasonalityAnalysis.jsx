@@ -1,17 +1,31 @@
-import React, { useState, useEffect, useMemo } from 'react'
-import { Calendar, TrendingUp, TrendingDown, Minus, RefreshCw, Filter, Download, ChevronLeft, ChevronRight, Search, ChevronDown, ChevronUp, Package, EyeOff, Eye, ArrowUpDown, ArrowUp, ArrowDown, Settings, Info } from 'lucide-react'
+import React, { useState, useEffect, useMemo, useRef } from 'react'
+import { Calendar, TrendingUp, TrendingDown, Minus, RefreshCw, Filter, ChevronLeft, ChevronRight, Search, ChevronDown, ChevronUp, Package, EyeOff, Eye, ArrowUpDown, ArrowUp, ArrowDown, Settings, Info, HelpCircle, X } from 'lucide-react'
 import { ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell } from 'recharts'
 import { API_BASE_URL } from '../config/api'
 
+// Cache helpers
+const CACHE_KEY = 'seasonality_cache';
+const getFromCache = (key, defaultValue) => {
+  try {
+    const cached = localStorage.getItem(CACHE_KEY);
+    if (!cached) return defaultValue;
+    const parsed = JSON.parse(cached);
+    return parsed[key] !== undefined ? parsed[key] : defaultValue;
+  } catch { return defaultValue; }
+};
+const saveAllToCache = (values) => {
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify(values)); } catch {}
+};
+
 function SeasonalityAnalysis() {
   const API_URL = API_BASE_URL;
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [data, setData] = useState([]);
-  const [filters, setFilters] = useState({ rodzaje: [], marki: [] });
-  const [period, setPeriod] = useState({ start: '', end: '' });
-  const [totalProducts, setTotalProducts] = useState(0);
-  const [weeksList, setWeeksList] = useState([]); // Lista 52 tygodni z API
+  const [data, setData] = useState(() => getFromCache('data', []));
+  const [filters, setFilters] = useState(() => getFromCache('filters', { rodzaje: [], marki: [] }));
+  const [period, setPeriod] = useState(() => getFromCache('period', { start: '', end: '' }));
+  const [totalProducts, setTotalProducts] = useState(() => getFromCache('totalProducts', 0));
+  const [weeksList, setWeeksList] = useState(() => getFromCache('weeksList', [])); // Lista 52 tygodni z API
 
   // Filtry
   const [selectedRodzaj, setSelectedRodzaj] = useState('');
@@ -53,6 +67,9 @@ function SeasonalityAnalysis() {
   const [deliveryWeeks, setDeliveryWeeks] = useState(1); // Czas dostawy w tygodniach
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
 
+  // Stan dla okna pomocy
+  const [showHelp, setShowHelp] = useState(false);
+
   // Pobierz ignorowane produkty z API przy starcie
   const fetchIgnoredProducts = async () => {
     try {
@@ -68,8 +85,18 @@ function SeasonalityAnalysis() {
     }
   };
 
+  // Ref do śledzenia czy już pobrano dane
+  const hasFetchedRef = useRef(false);
+  const lastMagazynyRef = useRef('');
+
   useEffect(() => {
     fetchIgnoredProducts();
+    // Pobierz dane tylko raz przy pierwszym montowaniu
+    if (!hasFetchedRef.current) {
+      hasFetchedRef.current = true;
+      lastMagazynyRef.current = selectedMagazyny.join(',');
+      fetchSeasonalityData();
+    }
   }, []);
 
   // Funkcja do przełączania ignorowania produktu (zapisuje do bazy)
@@ -177,11 +204,25 @@ function SeasonalityAnalysis() {
       const result = await response.json();
 
       if (result.success) {
-        setData(result.data || []);
-        setFilters(result.filters || { rodzaje: [], marki: [] });
-        setPeriod(result.period || { start: '', end: '' });
-        setTotalProducts(result.total_products || 0);
-        setWeeksList(result.weeks || []); // Lista 52 tygodni z API
+        const newData = result.data || [];
+        const newFilters = result.filters || { rodzaje: [], marki: [] };
+        const newPeriod = result.period || { start: '', end: '' };
+        const newTotalProducts = result.total_products || 0;
+        const newWeeksList = result.weeks || [];
+
+        setData(newData);
+        setFilters(newFilters);
+        setPeriod(newPeriod);
+        setTotalProducts(newTotalProducts);
+        setWeeksList(newWeeksList);
+
+        saveAllToCache({
+          data: newData,
+          filters: newFilters,
+          period: newPeriod,
+          totalProducts: newTotalProducts,
+          weeksList: newWeeksList
+        });
       }
     } catch (err) {
       console.error('Błąd podczas pobierania danych sezonowości:', err);
@@ -191,8 +232,13 @@ function SeasonalityAnalysis() {
     }
   };
 
+  // Pobierz dane gdy zmienią się magazyny (ale nie przy pierwszym montowaniu)
   useEffect(() => {
-    fetchSeasonalityData();
+    const currentMagazyny = selectedMagazyny.join(',');
+    if (hasFetchedRef.current && currentMagazyny !== lastMagazynyRef.current) {
+      lastMagazynyRef.current = currentMagazyny;
+      fetchSeasonalityData();
+    }
   }, [selectedMagazyny]);
 
   const handleFilterApply = () => {
@@ -422,15 +468,6 @@ function SeasonalityAnalysis() {
   useEffect(() => {
     setCurrentPage(1);
   }, [showOnlyMissing, hideIgnored, minStockSearchSymbol, minStockSelectedRodzaj]);
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <RefreshCw className="w-8 h-8 animate-spin text-primary-600" />
-        <span className="ml-3 text-lg text-gray-600">Ładowanie danych sezonowości...</span>
-      </div>
-    );
-  }
 
   return (
     <div className="space-y-6">
@@ -1109,6 +1146,93 @@ function SeasonalityAnalysis() {
           </div>
         </div>
       </div>
+
+      {/* Przycisk pomocy */}
+      <button
+        onClick={() => setShowHelp(true)}
+        className="fixed bottom-6 right-6 w-14 h-14 bg-primary-600 hover:bg-primary-700 text-white rounded-full shadow-lg flex items-center justify-center transition-all hover:scale-110 z-40"
+        title="Pomoc"
+      >
+        <HelpCircle className="w-7 h-7" />
+      </button>
+
+      {/* Modal pomocy */}
+      {showHelp && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 bg-white border-b px-6 py-4 flex items-center justify-between rounded-t-2xl">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center">
+                  <HelpCircle className="w-6 h-6 text-purple-600" />
+                </div>
+                <h2 className="text-xl font-bold text-gray-900">Analiza Sezonowosci - Pomoc</h2>
+              </div>
+              <button onClick={() => setShowHelp(false)} className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+            <div className="p-6 space-y-6">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">Do czego sluzy ten widok?</h3>
+                <p className="text-gray-600">
+                  Widok Analiza Sezonowosci pozwala identyfikowac wzorce sezonowe w sprzedazy produktow.
+                  Na podstawie tych danych mozna planowac zapasy i unikac brakow w okresach wysokiego popytu.
+                </p>
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-3">Glowne funkcjonalnosci:</h3>
+                <div className="space-y-3">
+                  <div className="flex items-start space-x-3 p-3 bg-purple-50 rounded-lg">
+                    <TrendingUp className="w-5 h-5 text-purple-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Indeks sezonowosci</p>
+                      <p className="text-sm text-gray-600">Wskaznik pokazujacy jak sprzedaz w danym tygodniu ma sie do sredniej. Indeks 2.0 = dwukrotnie wyzsza sprzedaz.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-green-50 rounded-lg">
+                    <Package className="w-5 h-5 text-green-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Proponowane stany minimalne</p>
+                      <p className="text-sm text-gray-600">Automatyczne wyliczenie minimalnych stanow na podstawie sezonowosci i parametrow dostawy.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-blue-50 rounded-lg">
+                    <Calendar className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Mapa cieplna tygodni</p>
+                      <p className="text-sm text-gray-600">Kolorowa tabela pokazujaca sezonowość w ukladzie tygodniowym - latwiejsze wykrywanie wzorcow.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-orange-50 rounded-lg">
+                    <EyeOff className="w-5 h-5 text-orange-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Ignorowanie produktow</p>
+                      <p className="text-sm text-gray-600">Mozliwosc oznaczenia produktow jako "nie do zamawiania" (np. wycofane z oferty).</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-pink-50 rounded-lg">
+                    <Settings className="w-5 h-5 text-pink-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Parametry obliczen</p>
+                      <p className="text-sm text-gray-600">Mozliwosc ustawienia zapasu tygodniowego i czasu dostawy dla dokladniejszych obliczen.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h4 className="font-medium text-gray-900 mb-2">Wskazowka</h4>
+                <p className="text-sm text-gray-600">
+                  Kliknij wiersz produktu w tabeli sezonowosci, aby zobaczyc szczegolowy wykres trendu.
+                  Uzyj filtru "Tylko brakujące" aby szybko znalezc produkty wymagające uzupelnienia.
+                </p>
+              </div>
+            </div>
+            <div className="sticky bottom-0 bg-gray-50 px-6 py-4 border-t rounded-b-2xl">
+              <button onClick={() => setShowHelp(false)} className="w-full btn-primary">Rozumiem</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

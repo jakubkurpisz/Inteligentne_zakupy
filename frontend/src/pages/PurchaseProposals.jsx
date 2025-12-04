@@ -1,12 +1,32 @@
 import React, { useState, useEffect } from 'react'
-import { Package, TrendingDown, ShoppingCart, AlertCircle, RefreshCw, DollarSign, Filter, Download, Edit2, X, Check } from 'lucide-react'
+import { Package, TrendingDown, ShoppingCart, AlertCircle, RefreshCw, DollarSign, Filter, Edit2, X, Check, HelpCircle } from 'lucide-react'
 import { API_BASE_URL } from '../config/api'
+
+// Cache helpers
+const CACHE_KEY = 'purchaseProposals_cache';
+const getFromCache = (defaultValue) => {
+  try {
+    const cached = localStorage.getItem(CACHE_KEY);
+    return cached ? JSON.parse(cached) : defaultValue;
+  } catch { return defaultValue; }
+};
+const saveToCache = (value) => {
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify(value)); } catch {}
+};
 
 function PurchaseProposals() {
   const API_URL = API_BASE_URL
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
-  const [data, setData] = useState(null)
+  const [data, setData] = useState(() => getFromCache({
+    summary: {
+      total_products: 0,
+      products_below_minimum: 0,
+      products_ok: 0,
+      total_purchase_value: 0
+    },
+    items: []
+  }))
   const [minStockDays, setMinStockDays] = useState(30)
   const [searchTerm, setSearchTerm] = useState('')
   const [editingSymbol, setEditingSymbol] = useState(null)
@@ -16,6 +36,7 @@ function PurchaseProposals() {
   const [customNotes, setCustomNotes] = useState('')
   const [sortField, setSortField] = useState('SrednieDzienneZuzycie')
   const [sortDirection, setSortDirection] = useState('desc')
+  const [showHelp, setShowHelp] = useState(false)
 
   useEffect(() => {
     fetchProposals()
@@ -30,6 +51,7 @@ function PurchaseProposals() {
       }
       const result = await response.json()
       setData(result)
+      saveToCache(result)
     } catch (error) {
       setError(error)
       console.error("Błąd podczas pobierania propozycji zakupowych:", error)
@@ -105,34 +127,6 @@ function PurchaseProposals() {
       console.error('Błąd podczas usuwania:', error)
       alert('Błąd podczas usuwania niestandardowego okresu')
     }
-  }
-
-  const exportToCSV = () => {
-    if (!data || !data.items) return
-
-    const headers = ['Symbol', 'Nazwa', 'Marka', 'Stan', 'Stan Min.', 'Różnica', 'Do Zamówienia', 'Wartość', 'Status']
-    const rows = data.items.map(item => [
-      item.Symbol,
-      item.Nazwa,
-      item.Marka,
-      item.Stan,
-      item.StanMinimalny,
-      item.Roznica,
-      item.IloscDoZamowienia,
-      item.WartoscZamowienia,
-      item.Status
-    ])
-
-    const csvContent = [
-      headers.join(';'),
-      ...rows.map(row => row.join(';'))
-    ].join('\n')
-
-    const blob = new Blob(['\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' })
-    const link = document.createElement('a')
-    link.href = URL.createObjectURL(blob)
-    link.download = `propozycje_zakupowe_${new Date().toISOString().split('T')[0]}.csv`
-    link.click()
   }
 
   const handleSort = (field) => {
@@ -226,17 +220,6 @@ function PurchaseProposals() {
     )
   }
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600 mx-auto"></div>
-          <p className="mt-4 text-gray-600">Ładowanie propozycji zakupowych...</p>
-        </div>
-      </div>
-    )
-  }
-
   if (error) {
     return (
       <div className="text-center py-12">
@@ -249,9 +232,6 @@ function PurchaseProposals() {
     )
   }
 
-  if (!data) {
-    return <div className="text-center text-lg font-medium">Brak danych</div>
-  }
 
   return (
     <div className="space-y-6">
@@ -262,13 +242,6 @@ function PurchaseProposals() {
           <p className="text-gray-500 mt-1">Automatyczne wyliczanie stanów minimalnych na podstawie średniego zużycia</p>
         </div>
         <div className="flex items-center space-x-3">
-          <button
-            onClick={exportToCSV}
-            className="btn-secondary flex items-center space-x-2"
-          >
-            <Download className="w-4 h-4" />
-            <span>Eksportuj CSV</span>
-          </button>
           <button
             onClick={fetchProposals}
             className="btn-secondary flex items-center space-x-2"
@@ -607,6 +580,86 @@ function PurchaseProposals() {
       <div className="text-center text-sm text-gray-500">
         Ostatnia aktualizacja: {new Date().toLocaleString('pl-PL')} | Okres: ostatnie 90 dni
       </div>
+
+      {/* Przycisk pomocy */}
+      <button
+        onClick={() => setShowHelp(true)}
+        className="fixed bottom-6 right-6 w-14 h-14 bg-primary-600 hover:bg-primary-700 text-white rounded-full shadow-lg flex items-center justify-center transition-all hover:scale-110 z-40"
+        title="Pomoc"
+      >
+        <HelpCircle className="w-7 h-7" />
+      </button>
+
+      {/* Modal pomocy */}
+      {showHelp && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 bg-white border-b px-6 py-4 flex items-center justify-between rounded-t-2xl">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 bg-yellow-100 rounded-lg flex items-center justify-center">
+                  <HelpCircle className="w-6 h-6 text-yellow-600" />
+                </div>
+                <h2 className="text-xl font-bold text-gray-900">Propozycje Zakupowe - Pomoc</h2>
+              </div>
+              <button onClick={() => setShowHelp(false)} className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+            <div className="p-6 space-y-6">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">Do czego sluzy ten widok?</h3>
+                <p className="text-gray-600">
+                  Widok Propozycje Zakupowe automatycznie wylicza stany minimalne na podstawie sredniego dziennego zuzycia
+                  i sugeruje ilosci do zamowienia dla produktow z grupy Suplementy.
+                </p>
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-3">Glowne funkcjonalnosci:</h3>
+                <div className="space-y-3">
+                  <div className="flex items-start space-x-3 p-3 bg-red-50 rounded-lg">
+                    <TrendingDown className="w-5 h-5 text-red-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Status PONIZEJ</p>
+                      <p className="text-sm text-gray-600">Produkty wymagajace natychmiastowego zamowienia - stan ponizej minimum.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-blue-50 rounded-lg">
+                    <Package className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Stan minimalny</p>
+                      <p className="text-sm text-gray-600">Wyliczany automatycznie: (Czas dostawy + Czestotliwosc) x Srednie dzienne zuzycie.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-green-50 rounded-lg">
+                    <Edit2 className="w-5 h-5 text-green-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Edycja parametrow</p>
+                      <p className="text-sm text-gray-600">Mozliwosc edycji czasu dostawy, czestotliwosci zamawiania i optymalnej wielkosci partii.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-yellow-50 rounded-lg">
+                    <DollarSign className="w-5 h-5 text-yellow-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium text-gray-900">Wartosc zamowienia</p>
+                      <p className="text-sm text-gray-600">Automatyczne wyliczenie wartosci zamowienia na podstawie cen zakupu.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h4 className="font-medium text-gray-900 mb-2">Wskazowka</h4>
+                <p className="text-sm text-gray-600">
+                  Najedz myszka na naglowek kolumny aby zobaczyc szczegolowy opis. Kliknij naglowek aby sortowac.
+                  Eksportuj liste do CSV aby ulatwic skladanie zamowien.
+                </p>
+              </div>
+            </div>
+            <div className="sticky bottom-0 bg-gray-50 px-6 py-4 border-t rounded-b-2xl">
+              <button onClick={() => setShowHelp(false)} className="w-full btn-primary">Rozumiem</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

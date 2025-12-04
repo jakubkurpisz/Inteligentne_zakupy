@@ -8,15 +8,45 @@ function DashboardTable() {
   const [error, setError] = useState(null);
   const [stats, setStats] = useState(null);
   const [salesPlans, setSalesPlans] = useState(null);
+  const [storeMetrics, setStoreMetrics] = useState(null);
+  const [footfall, setFootfall] = useState(null);  // Wejścia z AGIS
   const [currentTime, setCurrentTime] = useState(new Date());
+  const [lastUpdate, setLastUpdate] = useState(null);
+  const [nextRefresh, setNextRefresh] = useState(60);
+
+  const REFRESH_INTERVAL = 60; // sekundy
+
+  // Funkcja do odświeżania wszystkich danych
+  const refreshAllData = async () => {
+    await Promise.all([
+      fetchDashboardStats(),
+      fetchSalesPlans(),
+      fetchStoreMetrics(),
+      fetchFootfall()  // Pobierz wejścia z AGIS
+    ]);
+    setLastUpdate(new Date());
+    setNextRefresh(REFRESH_INTERVAL);
+  };
 
   useEffect(() => {
-    fetchDashboardStats();
-    fetchSalesPlans();
-    const interval = setInterval(() => {
+    // Pierwsze pobranie danych
+    refreshAllData();
+
+    // Zegar co sekundę
+    const clockInterval = setInterval(() => {
       setCurrentTime(new Date());
+      setNextRefresh(prev => prev > 0 ? prev - 1 : REFRESH_INTERVAL);
     }, 1000);
-    return () => clearInterval(interval);
+
+    // Automatyczne odświeżanie danych co 60 sekund
+    const dataInterval = setInterval(() => {
+      refreshAllData();
+    }, REFRESH_INTERVAL * 1000);
+
+    return () => {
+      clearInterval(clockInterval);
+      clearInterval(dataInterval);
+    };
   }, []);
 
   const fetchDashboardStats = async () => {
@@ -72,6 +102,36 @@ function DashboardTable() {
     }
   };
 
+  const fetchStoreMetrics = async () => {
+    try {
+      const response = await fetch(`${API_URL}/api/store-metrics`);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const data = await response.json();
+      if (data.success) {
+        setStoreMetrics(data);
+      }
+    } catch (error) {
+      console.error("Błąd podczas pobierania metryk sklepów:", error);
+    }
+  };
+
+  const fetchFootfall = async () => {
+    try {
+      const response = await fetch(`${API_URL}/api/footfall`);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const data = await response.json();
+      if (data.success) {
+        setFootfall(data.data);
+      }
+    } catch (error) {
+      console.error("Błąd podczas pobierania wejść:", error);
+    }
+  };
+
   const formatNumber = (num, decimals = 2) => {
     if (isNaN(num)) return '0,00';
     const fixed = Number(num).toFixed(decimals);
@@ -119,14 +179,81 @@ function DashboardTable() {
     return <div className="text-center text-lg font-medium">Brak danych</div>;
   }
 
-  // Oblicz sumy dla całej firmy
-  const totalWarehouseSales = stats.warehouse_stats?.reduce((sum, w) => sum + w.sprzedaz, 0) || 0;
-  const totalWarehouseTransactions = stats.warehouse_stats?.reduce((sum, w) => sum + w.transakcje, 0) || 0;
-  const totalWarehouseItems = stats.warehouse_stats?.reduce((sum, w) => sum + w.ilosc_sprzedana, 0) || 0;
+  // Pobierz metryki z Google Sheets
+  const getMetrics = (key) => storeMetrics?.metrics?.[key] || null;
+
+  // Pomocnicza funkcja do mapowania nazwy magazynu na klucz w metrykach
+  const getMetricsKey = (warehouseName) => {
+    if (warehouseName === 'GLS') return 'GLS';
+    if (warehouseName === '4F') return '4F';
+    if (warehouseName === 'JEANS') return 'GLJ';
+    return warehouseName;
+  };
+
+  // Oblicz sumy dla całej firmy - uwzględniając że 4F bierze dane z Google Sheets
+  const calculateTotalSales = () => {
+    if (!stats?.warehouse_stats) return 0;
+    return stats.warehouse_stats.reduce((sum, w) => {
+      const metricsKey = getMetricsKey(w.nazwa);
+      const metrics = getMetrics(metricsKey);
+      const wynikGS = metrics?.wynik || 0;
+      // Dla 4F użyj wyniku z Google Sheets jeśli dostępny
+      const wynik = w.nazwa === '4F' && wynikGS > 0 ? wynikGS : w.sprzedaz;
+      return sum + wynik;
+    }, 0);
+  };
+
+  const totalWarehouseSales = calculateTotalSales();
+
+  // Oblicz sumę transakcji (paragonów) - dla 4F weź bezpośrednio z Google Sheets (paragony)
+  const calculateTotalTransactions = () => {
+    if (!stats?.warehouse_stats) return 0;
+    return stats.warehouse_stats.reduce((sum, w) => {
+      if (w.nazwa === '4F') {
+        // Dla 4F weź paragony bezpośrednio z Google Sheets
+        const metrics4F = getMetrics('4F');
+        return sum + (metrics4F?.paragony || 0);
+      }
+      return sum + w.transakcje;
+    }, 0);
+  };
+
+  const totalWarehouseTransactions = calculateTotalTransactions();
+
+  // Oblicz sumę sprzedanych sztuk - dla 4F weź bezpośrednio z Google Sheets (sztuki)
+  const calculateTotalItems = () => {
+    if (!stats?.warehouse_stats) return 0;
+    return stats.warehouse_stats.reduce((sum, w) => {
+      if (w.nazwa === '4F') {
+        // Dla 4F weź sztuki bezpośrednio z Google Sheets
+        const metrics4F = getMetrics('4F');
+        return sum + (metrics4F?.sztuki || 0);
+      }
+      return sum + w.ilosc_sprzedana;
+    }, 0);
+  };
+
+  const totalWarehouseItems = calculateTotalItems();
   const totalUPT = totalWarehouseTransactions > 0 ? totalWarehouseItems / totalWarehouseTransactions : 0;
 
-  // Pobierz plan z API, z fallbackiem do hardcoded wartości
-  const totalPlan = salesPlans?.total || 33359;
+  // Pobierz plan z API - suma planów dla wszystkich jednostek
+  const totalPlan = (salesPlans?.['GLS'] || 0) + (salesPlans?.['4F'] || 0) + (salesPlans?.['JEANS'] || 0);
+
+  // Funkcja do pobierania wejść dla danej jednostki
+  // GLS - z API footfall (AGIS), JNS/JEANS - z API footfall (TopReports), 4F - z Google Sheets
+  const getWejscia = (warehouseName) => {
+    if (warehouseName === 'GLS') {
+      return footfall?.GLS || 0;
+    }
+    if (warehouseName === 'JEANS') {
+      return footfall?.JNS || 0;
+    }
+    const metricsKey = getMetricsKey(warehouseName);
+    return getMetrics(metricsKey)?.wejscia || 0;
+  };
+
+  // Suma wejść - GLS z AGIS, JNS z TopReports, 4F z Google Sheets
+  const totalWejscia = (footfall?.GLS || 0) + (getMetrics('4F')?.wejscia || 0) + (footfall?.JNS || 0);
 
   return (
     <div className="space-y-4">
@@ -141,11 +268,11 @@ function DashboardTable() {
           </div>
         </div>
         <button
-          onClick={fetchDashboardStats}
+          onClick={refreshAllData}
           className="btn-secondary flex items-center space-x-2"
         >
           <RefreshCw className="w-4 h-4" />
-          <span>Odśwież dane</span>
+          <span>Odśwież</span>
         </button>
       </div>
 
@@ -159,12 +286,11 @@ function DashboardTable() {
           <thead>
             <tr className="bg-gray-100">
               <th className="py-3 px-4 text-left font-bold border-r border-gray-300">JEDNOSTKA</th>
-              <th className="py-3 px-4 text-center font-bold border-r border-gray-300">PLAN</th>
-              <th className="py-3 px-4 text-center font-bold border-r border-gray-300">RÓŻNICA</th>
+              <th className="py-3 px-4 text-center font-bold border-r border-gray-300">WYNIK</th>
+              <th className="py-3 px-4 text-center font-bold border-r border-gray-300">REALIZACJA</th>
               <th className="py-3 px-4 text-center font-bold border-r border-gray-300">WEJŚCIA</th>
               <th className="py-3 px-4 text-center font-bold border-r border-gray-300">UPT</th>
-              <th className="py-3 px-4 text-center font-bold border-r border-gray-300">KONWERSJA</th>
-              <th className="py-3 px-4 text-center font-bold">WYNIK</th>
+              <th className="py-3 px-4 text-center font-bold">KONWERSJA</th>
             </tr>
           </thead>
           <tbody>
@@ -177,24 +303,20 @@ function DashboardTable() {
               </td>
               <td className="py-4 px-4 text-center border-r border-gray-300">
                 <div className="text-sm text-gray-600">RÓŻNICA: {formatNumber(totalWarehouseSales - totalPlan)}</div>
-                <div className={`text-2xl font-bold ${getChangeColor((totalWarehouseSales - totalPlan) / totalPlan * 100)}`}>
-                  {((totalWarehouseSales - totalPlan) / totalPlan * 100) >= 0 ? '+' : ''}{formatNumber((totalWarehouseSales - totalPlan) / totalPlan * 100, 1)}%
+                <div className={`text-2xl font-bold ${getChangeColor((totalWarehouseSales / totalPlan * 100) - 100)}`}>
+                  {formatNumber(totalWarehouseSales / totalPlan * 100, 1)}%
                 </div>
               </td>
               <td className="py-4 px-4 text-center border-r border-gray-300">
-                <div className="text-sm text-gray-600">WEJŚCIA: 204</div>
+                <div className="text-2xl font-bold text-gray-900">{totalWejscia || '-'}</div>
               </td>
               <td className="py-4 px-4 text-center border-r border-gray-300">
                 <div className="text-3xl font-bold text-gray-900">{formatNumber(totalUPT, 2)}</div>
               </td>
-              <td className="py-4 px-4 text-center border-r border-gray-300">
+              <td className="py-4 px-4 text-center">
                 <div className="text-3xl font-bold text-green-600">
-                  {formatNumber((totalWarehouseTransactions / 204) * 100, 2)}%
+                  {totalWejscia > 0 ? formatNumber((totalWarehouseTransactions / totalWejscia) * 100, 2) : '-'}%
                 </div>
-              </td>
-              <td className="py-4 px-4 text-right bg-yellow-50">
-                <div className="text-sm text-gray-600">WYNIK</div>
-                <div className="font-bold">{formatNumber(stats.sales_today)} zł</div>
               </td>
             </tr>
 
@@ -205,110 +327,52 @@ function DashboardTable() {
               const diff = warehouse.sprzedaz - plan;
               const diffPercent = plan > 0 ? (diff / plan) * 100 : 0;
 
+              // Pobierz metryki z Google Sheets dla tego magazynu
+              const metricsKey = getMetricsKey(warehouse.nazwa);
+              const metrics = getMetrics(metricsKey);
+              // Wejścia: dla GLS z AGIS, dla pozostałych z Google Sheets
+              const wejscia = getWejscia(warehouse.nazwa);
+              const uptGS = metrics?.upt || 0;
+              const konwersjaGS = metrics?.konwersja || 0;
+              const wynikGS = metrics?.wynik || 0;
+
+              // Dla 4F użyj wyniku z Google Sheets jeśli nie ma danych z bazy
+              const wynik = warehouse.nazwa === '4F' && wynikGS > 0 ? wynikGS : warehouse.sprzedaz;
+
+              // Procent realizacji planu
+              const realizacjaPercent = plan > 0 ? (wynik / plan) * 100 : 0;
+
               return (
                 <tr key={index} className="border-b border-gray-200 hover:bg-gray-50">
                   <td className="py-4 px-4 font-bold text-lg border-r border-gray-300">{warehouse.nazwa}</td>
                   <td className="py-4 px-4 text-center border-r border-gray-300">
                     <div className="text-sm text-gray-600">PLAN: {formatNumber(plan)}</div>
-                    <div className="text-2xl font-bold text-red-600">{formatNumber(warehouse.sprzedaz)} zł</div>
+                    <div className="text-2xl font-bold text-red-600">{formatNumber(wynik)} zł</div>
                   </td>
-                  <td className={`py-4 px-4 text-center border-r border-gray-300 ${getBgChangeColor(diffPercent)}`}>
-                    <div className="text-sm text-gray-600">RÓŻNICA: {formatNumber(diff)}</div>
-                    <div className={`text-xl font-bold ${getChangeColor(diffPercent)}`}>
-                      {diffPercent >= 0 ? '+' : ''}{formatNumber(diffPercent, 2)}%
+                  <td className={`py-4 px-4 text-center border-r border-gray-300 ${getBgChangeColor(realizacjaPercent - 100)}`}>
+                    <div className="text-sm text-gray-600">RÓŻNICA: {formatNumber(wynik - plan)}</div>
+                    <div className={`text-xl font-bold ${getChangeColor(realizacjaPercent - 100)}`}>
+                      {formatNumber(realizacjaPercent, 2)}%
                     </div>
                   </td>
                   <td className="py-4 px-4 text-center border-r border-gray-300">
-                    <div className="text-sm text-gray-600">PLAN: 1.50-2.10</div>
-                    <div className="text-2xl font-bold text-gray-900">{warehouse.transakcje}</div>
+                    <div className="text-2xl font-bold text-gray-900">{wejscia || '-'}</div>
                   </td>
                   <td className="py-4 px-4 text-center border-r border-gray-300">
-                    <div className="text-2xl font-bold text-gray-900">{formatNumber(warehouse.upt, 2)}</div>
+                    <div className="text-2xl font-bold text-gray-900">
+                      {/* Dla GLS i JEANS używaj UPT z SQL, dla 4F z Google Sheets */}
+                      {warehouse.nazwa === '4F' && uptGS > 0
+                        ? formatNumber(uptGS, 2)
+                        : formatNumber(warehouse.upt, 2)}
+                    </div>
                   </td>
-                  <td className="py-4 px-4 text-center border-r border-gray-300">
-                    <div className="text-sm text-gray-600">PLAN: 13-16%</div>
+                  <td className="py-4 px-4 text-center">
                     <div className="text-2xl font-bold text-green-600">
-                      {formatNumber((warehouse.transakcje / 50) * 100, 2)}%
+                      {/* Dla GLS i JEANS oblicz Konwersję z SQL, dla 4F z Google Sheets */}
+                      {warehouse.nazwa === '4F' && konwersjaGS > 0
+                        ? formatNumber(konwersjaGS, 2)
+                        : (wejscia > 0 ? formatNumber((warehouse.transakcje / wejscia) * 100, 2) : '-')}%
                     </div>
-                  </td>
-                  <td className="py-4 px-4 text-right bg-yellow-50">
-                    <div className="text-sm text-gray-600">WYNIK</div>
-                    <div className="font-bold">{formatNumber(warehouse.sprzedaz)} zł</div>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Tabela Plan na dziś */}
-      <div className="bg-white rounded-lg shadow overflow-hidden">
-        <div className="bg-yellow-300 text-black font-bold text-center py-2 text-lg">
-          PLAN NA DZIŚ vs AKTUALNY WYNIK
-        </div>
-
-        <table className="w-full">
-          <thead>
-            <tr className="bg-gray-100">
-              <th className="py-3 px-4 text-left font-bold border-r border-gray-300">JEDNOSTKA</th>
-              <th className="py-3 px-4 text-center font-bold border-r border-gray-300">PLAN NA DZIŚ</th>
-              <th className="py-3 px-4 text-center font-bold border-r border-gray-300">AKTUALNY WYNIK</th>
-              <th className="py-3 px-4 text-center font-bold border-r border-gray-300" colSpan="2">STAN JEDNOSTEK NA:</th>
-              <th className="py-3 px-4 text-center font-bold border-r border-gray-300">WYNIK</th>
-              <th className="py-3 px-4 text-center font-bold">WEJŚCIA</th>
-            </tr>
-            <tr className="bg-gray-50 text-sm">
-              <th className="py-2 px-4 border-r border-gray-300"></th>
-              <th className="py-2 px-4 border-r border-gray-300"></th>
-              <th className="py-2 px-4 border-r border-gray-300"></th>
-              <th className="py-2 px-4 text-center border-r border-gray-300">DZIŚ DO 2024</th>
-              <th className="py-2 px-4 text-center border-r border-gray-300">DO PLANU NA DZIŚ</th>
-              <th className="py-2 px-4 border-r border-gray-300"></th>
-              <th className="py-2 px-4"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {/* CAŁA FIRMA */}
-            <tr className="border-b border-gray-200 bg-blue-50 font-bold">
-              <td className="py-3 px-4 border-r border-gray-300">CAŁA FIRMA</td>
-              <td className="py-3 px-4 text-right border-r border-gray-300">{formatNumber(totalPlan)}</td>
-              <td className="py-3 px-4 text-right border-r border-gray-300">{formatNumber(totalWarehouseSales)}</td>
-              <td className="py-3 px-4 text-right border-r border-gray-300">
-                {formatNumber((stats.sales_today / stats.sales_yesterday - 1) * 100, 2)}%
-              </td>
-              <td className="py-3 px-4 text-right border-r border-gray-300 text-red-600">
-                {formatNumber(((totalWarehouseSales - totalPlan) / totalPlan) * 100, 2)}%
-              </td>
-              <td className="py-3 px-4 text-right border-r border-gray-300 bg-cyan-100">
-                {formatNumber(totalWarehouseSales)}
-              </td>
-              <td className="py-3 px-4 text-right bg-cyan-100">
-                {formatNumber(totalWarehouseTransactions, 0)}
-              </td>
-            </tr>
-
-            {/* Magazyny */}
-            {stats.warehouse_stats && stats.warehouse_stats.map((warehouse, index) => {
-              // Pobierz plan z API, z fallbackiem do hardcoded wartości
-              const plan = salesPlans?.[warehouse.nazwa] || 0;
-
-              return (
-                <tr key={index} className="border-b border-gray-200 hover:bg-gray-50">
-                  <td className="py-3 px-4 font-bold border-r border-gray-300">{warehouse.nazwa}</td>
-                  <td className="py-3 px-4 text-right border-r border-gray-300">{formatNumber(plan)}</td>
-                  <td className="py-3 px-4 text-right border-r border-gray-300">{formatNumber(warehouse.sprzedaz)}</td>
-                  <td className="py-3 px-4 text-right border-r border-gray-300">
-                    {formatNumber(Math.random() * 5 - 2, 2)}%
-                  </td>
-                  <td className={`py-3 px-4 text-right border-r border-gray-300 ${warehouse.sprzedaz < plan ? 'text-red-600' : 'text-green-600'}`}>
-                    {formatNumber(((warehouse.sprzedaz - plan) / plan) * 100, 2)}%
-                  </td>
-                  <td className="py-3 px-4 text-right border-r border-gray-300 bg-cyan-100">
-                    {formatNumber(warehouse.sprzedaz)}
-                  </td>
-                  <td className="py-3 px-4 text-right bg-cyan-100">
-                    {formatNumber(warehouse.transakcje, 0)}
                   </td>
                 </tr>
               );
@@ -319,7 +383,7 @@ function DashboardTable() {
 
       {/* Informacja o aktualizacji */}
       <div className="text-center text-sm text-gray-500">
-        Ostatnia aktualizacja: {new Date().toLocaleString('pl-PL')}
+        Ostatnia aktualizacja: {lastUpdate ? lastUpdate.toLocaleString('pl-PL') : new Date().toLocaleString('pl-PL')}
       </div>
     </div>
   )

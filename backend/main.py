@@ -14,6 +14,7 @@ import csv
 import requests
 from io import StringIO
 import socket
+from bs4 import BeautifulSoup
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 import math
@@ -38,6 +39,12 @@ dashboard_stats_cache = {
     "data": None,
     "timestamp": None,
     "cache_duration": 60  # 1 minuta w sekundach (częstsze odświeżanie dla dashboardu)
+}
+
+# Cache dla seasonality-index (długi czas cache - dane zmieniają się wolno)
+seasonality_cache = {
+    "data": {},  # Słownik z kluczem = parametry zapytania
+    "cache_duration": 1800  # 30 minut w sekundach
 }
 
 # Konfiguracja CORS
@@ -141,20 +148,33 @@ def get_sales_plans_from_db(start_date=None, end_date=None):
         conn = sqlite3.connect(str(DATABASE_FILE))
         cursor = conn.cursor()
 
+        # Konwertuj daty z DD.MM.YYYY na YYYY-MM-DD dla poprawnego porównania
+        def convert_date(date_str):
+            if not date_str:
+                return None
+            parts = date_str.split('.')
+            if len(parts) == 3:
+                return f"{parts[2]}-{parts[1]}-{parts[0]}"  # YYYY-MM-DD
+            return date_str
+
+        # Użyj substr do konwersji daty w bazie na format YYYY-MM-DD
+        # date w formacie DD.MM.YYYY -> substr(date,7,4)||'-'||substr(date,4,2)||'-'||substr(date,1,2)
+        date_expr = "substr(date,7,4)||'-'||substr(date,4,2)||'-'||substr(date,1,2)"
+
         query = "SELECT date, gls, four_f, jeans, total FROM sales_plans"
         params = []
 
         if start_date or end_date:
             conditions = []
             if start_date:
-                conditions.append("date >= ?")
-                params.append(start_date)
+                conditions.append(f"{date_expr} >= ?")
+                params.append(convert_date(start_date))
             if end_date:
-                conditions.append("date <= ?")
-                params.append(end_date)
+                conditions.append(f"{date_expr} <= ?")
+                params.append(convert_date(end_date))
             query += " WHERE " + " AND ".join(conditions)
 
-        query += " ORDER BY date DESC"
+        query += f" ORDER BY {date_expr} DESC"
 
         cursor.execute(query, params)
         rows = cursor.fetchall()
@@ -1668,6 +1688,96 @@ async def get_sales_plans(
         )
 
 
+@app.get("/api/store-metrics")
+async def get_store_metrics():
+    """
+    Pobiera metryki TYLKO dla 4F z Google Sheets (zakładka PANEL_ZARZADZANIA):
+    - Paragony (transakcje)
+    - UPT (Units Per Transaction)
+    - Konwersja
+    - Wynik
+    - Wejścia
+    - Sztuki
+
+    Dane 4F są w komórkach B120:C125 (6 wierszy):
+    0: PARAGONY
+    1: UPT
+    2: KONWERSJA
+    3: WYNIK
+    4: WEJSCIA
+    5: SZTUKI
+
+    GLS i JEANS pobierają dane z bazy SQL (dashboard-stats).
+    """
+    try:
+        SHEET_ID = "1j1hBF_QfN5wL1f2jUO4HKUlbPy_W914cDaHgUWZP2cI"
+        SHEET_NAME = "PANEL_ZARZADZANIA"
+        # Pobierz TYLKO zakres B120:C125 który zawiera dane 4F (6 wierszy)
+        url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet={SHEET_NAME}&range=B120:C125"
+
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+
+        # Parsuj CSV - użyj modułu csv żeby poprawnie obsłużyć przecinki w wartościach
+        import csv as csv_module
+        from io import StringIO as SIO
+        lines = list(csv_module.reader(SIO(response.text)))
+
+        # Funkcja parsowania wartości
+        def parse_value(val):
+            if not val or val.strip() == '' or val.strip() == '""':
+                return 0
+            # Usuń cudzysłowy i zamień przecinek dziesiętny na kropkę
+            val = val.strip().strip('"').replace(',', '.').replace(' ', '')
+            try:
+                return float(val)
+            except:
+                return 0
+
+        # Struktura danych 4F (6 wierszy):
+        # 0: PARAGONY, 1: UPT, 2: KONWERSJA, 3: WYNIK, 4: WEJSCIA, 5: SZTUKI
+        metric_names = ['paragony', 'upt', 'konwersja', 'wynik', 'wejscia', 'sztuki']
+
+        store_4f = {"jednostka": "4F"}
+
+        for idx, metric_name in enumerate(metric_names):
+            if idx < len(lines):
+                row = lines[idx]
+                if len(row) >= 2:
+                    value = parse_value(row[1])
+
+                    if metric_name == 'paragony':
+                        store_4f['paragony'] = int(value)
+                    elif metric_name == 'upt':
+                        store_4f['upt'] = round(value, 2)
+                    elif metric_name == 'konwersja':
+                        # Konwersja jest jako ułamek (0.17), zamień na procent (17)
+                        store_4f['konwersja'] = round(value * 100, 2) if value < 1 else round(value, 2)
+                    elif metric_name == 'wynik':
+                        store_4f['wynik'] = round(value, 2)
+                    elif metric_name == 'wejscia':
+                        store_4f['wejscia'] = int(value)
+                    elif metric_name == 'sztuki':
+                        store_4f['sztuki'] = int(value)
+
+        return {
+            "success": True,
+            "metrics": {
+                "4F": store_4f
+            }
+        }
+
+    except Exception as e:
+        print(f"[ERROR] Błąd pobierania metryk 4F: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "success": False,
+            "error": str(e),
+            "metrics": {}
+        }
+
+
 @app.get("/api/sales-plans/today")
 async def get_today_sales_plan(sync: bool = False):
     """
@@ -2907,6 +3017,961 @@ async def get_warehouse_stocks(mag_ids: Optional[str] = "1,7,9"):
         raise HTTPException(
             status_code=500,
             detail=f"Błąd podczas pobierania stanów magazynowych: {str(e)}"
+        )
+
+
+@app.get("/api/seasonality-index")
+async def get_seasonality_index(
+    mag_ids: Optional[str] = "1,7,9",
+    rodzaj: Optional[str] = None,
+    marka: Optional[str] = None,
+    symbol: Optional[str] = None
+):
+    """
+    Oblicza indeks sezonowości dla produktów na podstawie danych z ostatniego roku.
+
+    Indeks sezonowości = Sprzedaż w danym tygodniu / Średnia tygodniowa sprzedaż z całego roku
+
+    Parametry:
+    - mag_ids: ID magazynów (domyślnie 1,7,9)
+    - rodzaj: Filtr po rodzaju produktu
+    - marka: Filtr po marce
+    - symbol: Filtr po symbolu (częściowe wyszukiwanie)
+    """
+    from datetime import datetime, timedelta
+
+    # Sprawdź cache
+    cache_key = f"{mag_ids}_{rodzaj}_{marka}_{symbol}"
+    if cache_key in seasonality_cache["data"]:
+        cached = seasonality_cache["data"][cache_key]
+        cache_age = (datetime.now() - cached["timestamp"]).total_seconds()
+        if cache_age < seasonality_cache["cache_duration"]:
+            print(f"[CACHE HIT] Sezonowość - zwracam dane z cache (wiek: {cache_age:.0f}s)")
+            return cached["result"]
+
+    try:
+        # Połączenie z SQL Server
+        server = os.getenv('SQL_SERVER', r'10.101.101.5\INSERTGT')
+        database = os.getenv('SQL_DATABASE', 'Sporting_Leszno')
+        username = os.getenv('SQL_USERNAME', 'zestawienia2')
+        password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
+
+        try:
+            sql_connection = pyodbc.connect(
+                'DRIVER={ODBC Driver 18 for SQL Server};'
+                f'SERVER={server};'
+                f'DATABASE={database};'
+                f'UID={username};'
+                f'PWD={password};'
+                'TrustServerCertificate=yes;'
+                'Connection Timeout=30;'
+            )
+        except pyodbc.Error as conn_err:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Błąd połączenia z SQL Server: {str(conn_err)}"
+            )
+
+        sql_cursor = sql_connection.cursor()
+
+        # Parsowanie mag_ids
+        if mag_ids:
+            mag_id_list = [int(x.strip()) for x in mag_ids.split(',') if x.strip().isdigit()]
+        else:
+            mag_id_list = [1, 7, 9]
+
+        mag_placeholders = ','.join(['?' for _ in mag_id_list])
+
+        # Oblicz daty - 52 tygodnie wstecz od dziś
+        end_date = datetime.now()
+        start_date = end_date - timedelta(weeks=52)
+
+        # Oblicz aktualny tydzień i rok
+        current_week = end_date.isocalendar()[1]
+        current_year = end_date.year
+        start_week = start_date.isocalendar()[1]
+        start_year = start_date.year
+
+        # Zapytanie pobierające sprzedaż per produkt per tydzień
+        # Używamy DATEPART(ISO_WEEK) dla spójności z isocalendar()
+        query = f"""
+        SELECT
+            tw.tw_Symbol AS Symbol,
+            tw.tw_Nazwa AS Nazwa,
+            tw.tw_Pole2 AS Marka,
+            tw.tw_pole8 AS Rodzaj,
+            tw.tw_pole3 AS Model,
+            DATEPART(ISO_WEEK, dok_DataWyst) AS NumerTygodnia,
+            YEAR(DATEADD(day, 26 - DATEPART(iso_week, dok_DataWyst), dok_DataWyst)) AS RokISO,
+            SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_IloscMag ELSE ob_IloscMag END) AS IloscSprzedana
+        FROM vwZstSprzWgKhnt
+        INNER JOIN tw__Towar tw ON ob_TowId = tw.tw_Id
+        WHERE CAST(dok_DataWyst AS DATE) >= ?
+            AND CAST(dok_DataWyst AS DATE) <= ?
+            AND dok_MagId IN ({mag_placeholders})
+            AND dok_Podtyp <> 1
+            AND dok_Status <> 2
+        """
+
+        params = [start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')] + mag_id_list
+
+        # Dodaj filtry
+        if rodzaj:
+            query += " AND tw.tw_pole8 = ?"
+            params.append(rodzaj)
+
+        if marka:
+            query += " AND tw.tw_Pole2 = ?"
+            params.append(marka)
+
+        if symbol:
+            query += " AND tw.tw_Symbol LIKE ?"
+            params.append(f"%{symbol}%")
+
+        query += """
+        GROUP BY
+            tw.tw_Symbol, tw.tw_Nazwa, tw.tw_Pole2, tw.tw_pole8, tw.tw_pole3,
+            DATEPART(ISO_WEEK, dok_DataWyst), YEAR(DATEADD(day, 26 - DATEPART(iso_week, dok_DataWyst), dok_DataWyst))
+        ORDER BY tw.tw_Symbol, RokISO, NumerTygodnia
+        """
+
+        sql_cursor.execute(query, params)
+        rows = sql_cursor.fetchall()
+
+        # Drugie zapytanie - trend z ostatnich 4 lat (sprzedaż roczna) - pobieramy 4 lata aby mieć pełne dane z 3 lat wstecz
+        trend_start_date = end_date - timedelta(days=4*365)
+        trend_query = f"""
+        SELECT
+            tw.tw_Symbol AS Symbol,
+            YEAR(dok_DataWyst) AS Rok,
+            SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_IloscMag ELSE ob_IloscMag END) AS IloscSprzedana
+        FROM vwZstSprzWgKhnt
+        INNER JOIN tw__Towar tw ON ob_TowId = tw.tw_Id
+        WHERE CAST(dok_DataWyst AS DATE) >= ?
+            AND CAST(dok_DataWyst AS DATE) <= ?
+            AND dok_MagId IN ({mag_placeholders})
+            AND dok_Podtyp <> 1
+            AND dok_Status <> 2
+        """
+        trend_params = [trend_start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')] + mag_id_list
+
+        if rodzaj:
+            trend_query += " AND tw.tw_pole8 = ?"
+            trend_params.append(rodzaj)
+        if marka:
+            trend_query += " AND tw.tw_Pole2 = ?"
+            trend_params.append(marka)
+        if symbol:
+            trend_query += " AND tw.tw_Symbol LIKE ?"
+            trend_params.append(f"%{symbol}%")
+
+        trend_query += """
+        GROUP BY tw.tw_Symbol, YEAR(dok_DataWyst)
+        ORDER BY tw.tw_Symbol, Rok
+        """
+
+        sql_cursor.execute(trend_query, trend_params)
+        trend_rows = sql_cursor.fetchall()
+
+        # Przetwórz dane trendu - sprzedaż per rok
+        trend_data = {}
+        for row in trend_rows:
+            sym = row[0]
+            year = int(row[1])
+            qty = float(row[2] or 0)
+            if sym not in trend_data:
+                trend_data[sym] = {}
+            trend_data[sym][year] = qty
+
+        # Trzecie zapytanie - dane tygodniowe z poprzednich 3 lat (dla trendu tygodniowego)
+        prev_year_start = end_date - timedelta(weeks=156)  # 3 lata wstecz
+        prev_year_end = end_date - timedelta(weeks=52)  # 1 rok wstecz (bieżący rok jest w głównym zapytaniu)
+
+        weekly_trend_query = f"""
+        SELECT
+            tw.tw_Symbol AS Symbol,
+            DATEPART(ISO_WEEK, dok_DataWyst) AS NumerTygodnia,
+            YEAR(DATEADD(day, 26 - DATEPART(iso_week, dok_DataWyst), dok_DataWyst)) AS RokISO,
+            SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_IloscMag ELSE ob_IloscMag END) AS IloscSprzedana
+        FROM vwZstSprzWgKhnt
+        INNER JOIN tw__Towar tw ON ob_TowId = tw.tw_Id
+        WHERE CAST(dok_DataWyst AS DATE) >= ?
+            AND CAST(dok_DataWyst AS DATE) <= ?
+            AND dok_MagId IN ({mag_placeholders})
+            AND dok_Podtyp <> 1
+            AND dok_Status <> 2
+        """
+        weekly_trend_params = [prev_year_start.strftime('%Y-%m-%d'), prev_year_end.strftime('%Y-%m-%d')] + mag_id_list
+
+        if rodzaj:
+            weekly_trend_query += " AND tw.tw_pole8 = ?"
+            weekly_trend_params.append(rodzaj)
+        if marka:
+            weekly_trend_query += " AND tw.tw_Pole2 = ?"
+            weekly_trend_params.append(marka)
+        if symbol:
+            weekly_trend_query += " AND tw.tw_Symbol LIKE ?"
+            weekly_trend_params.append(f"%{symbol}%")
+
+        weekly_trend_query += """
+        GROUP BY tw.tw_Symbol, DATEPART(ISO_WEEK, dok_DataWyst),
+                 YEAR(DATEADD(day, 26 - DATEPART(iso_week, dok_DataWyst), dok_DataWyst))
+        """
+
+        sql_cursor.execute(weekly_trend_query, weekly_trend_params)
+        weekly_trend_rows = sql_cursor.fetchall()
+
+        # Czwarte zapytanie - aktualne stany magazynowe
+        stock_query = f"""
+        SELECT
+            tw.tw_Symbol AS Symbol,
+            SUM(ISNULL(st.st_Stan, 0)) AS StanAktualny
+        FROM tw__Towar tw
+        LEFT JOIN tw_Stan st ON tw.tw_Id = st.st_TowId AND st.st_MagId IN ({mag_placeholders})
+        WHERE 1=1
+        """
+        stock_params = list(mag_id_list)
+
+        if rodzaj:
+            stock_query += " AND tw.tw_pole8 = ?"
+            stock_params.append(rodzaj)
+        if marka:
+            stock_query += " AND tw.tw_Pole2 = ?"
+            stock_params.append(marka)
+        if symbol:
+            stock_query += " AND tw.tw_Symbol LIKE ?"
+            stock_params.append(f"%{symbol}%")
+
+        stock_query += " GROUP BY tw.tw_Symbol"
+
+        sql_cursor.execute(stock_query, stock_params)
+        stock_rows = sql_cursor.fetchall()
+
+        # Przetwórz dane stanów magazynowych
+        stock_data = {}
+        for row in stock_rows:
+            sym = row[0]
+            stan = float(row[1] or 0)
+            stock_data[sym] = stan
+
+        sql_connection.close()
+
+        # Przetwórz dane trendu tygodniowego - sprzedaż per tydzień z poprzedniego roku
+        prev_year_weekly_data = {}
+        for row in weekly_trend_rows:
+            sym = row[0]
+            week_num = int(row[1])
+            year = int(row[2])
+            qty = float(row[3] or 0)
+            if sym not in prev_year_weekly_data:
+                prev_year_weekly_data[sym] = {}
+            week_key = f"{year}-{week_num:02d}"
+            prev_year_weekly_data[sym][week_key] = qty
+
+        # Generuj listę 52 tygodni wstecz od dziś (z zachowaniem numerów tygodni)
+        weeks_list = []
+        for i in range(51, -1, -1):  # Od 51 do 0 (52 tygodnie wstecz)
+            week_date = end_date - timedelta(weeks=i)
+            iso_cal = week_date.isocalendar()
+            weeks_list.append({
+                'week': iso_cal[1],  # numer tygodnia ISO
+                'year': iso_cal[0],  # rok ISO
+                'key': f"{iso_cal[0]}-{iso_cal[1]:02d}"  # klucz rok-tydzień
+            })
+
+        # Przetwarzanie danych - grupowanie per produkt
+        products_data = {}
+
+        for row in rows:
+            symbol = row[0]
+            nazwa = row[1]
+            marka_val = row[2] or ''
+            rodzaj_val = row[3] or ''
+            model = row[4] or ''
+            week_num = int(row[5])
+            year = int(row[6])
+            qty_sold = float(row[7] or 0)
+
+            if symbol not in products_data:
+                products_data[symbol] = {
+                    'Symbol': symbol,
+                    'Nazwa': nazwa,
+                    'Marka': marka_val,
+                    'Rodzaj': rodzaj_val,
+                    'Model': model,
+                    'weeks': {},
+                    'total_sold': 0
+                }
+
+            # Klucz tygodnia rok-numer
+            week_key = f"{year}-{week_num:02d}"
+            if week_key not in products_data[symbol]['weeks']:
+                products_data[symbol]['weeks'][week_key] = 0
+
+            products_data[symbol]['weeks'][week_key] += qty_sold
+            products_data[symbol]['total_sold'] += qty_sold
+
+        # Obliczanie indeksu sezonowości dla każdego produktu
+        results = []
+
+        for symbol, data in products_data.items():
+            # Średnia tygodniowa sprzedaż (suma / 52 tygodnie)
+            avg_weekly_sales = data['total_sold'] / 52 if data['total_sold'] > 0 else 0
+
+            # Przygotuj dane tygodniowe z indeksami - w kolejności chronologicznej
+            weekly_data = {}
+            product_prev_year = prev_year_weekly_data.get(symbol, {})
+
+            for week_info in weeks_list:
+                week_key = week_info['key']
+                week_sales = data['weeks'].get(week_key, 0)
+                if avg_weekly_sales > 0:
+                    seasonality_index = round(week_sales / avg_weekly_sales, 2)
+                else:
+                    seasonality_index = 0
+
+                # Znajdź odpowiadający tydzień z poprzednich lat
+                prev_year_key = f"{week_info['year'] - 1}-{week_info['week']:02d}"
+                prev_year_sales = product_prev_year.get(prev_year_key, 0)
+
+                prev_year_2_key = f"{week_info['year'] - 2}-{week_info['week']:02d}"
+                prev_year_2_sales = product_prev_year.get(prev_year_2_key, 0)
+
+                # Oblicz trend tygodniowy (porównanie z tym samym tygodniem rok wcześniej)
+                if prev_year_sales > 0:
+                    week_trend_pct = round(((week_sales - prev_year_sales) / prev_year_sales) * 100, 0)
+                else:
+                    week_trend_pct = 0 if week_sales == 0 else 100
+
+                weekly_data[week_key] = {
+                    'tydzien': week_info['week'],
+                    'rok': week_info['year'],
+                    'sprzedaz': round(week_sales, 0),
+                    'indeks': seasonality_index,
+                    'poprzedni_rok': round(prev_year_sales, 0),
+                    'poprzedni_rok_2': round(prev_year_2_sales, 0),
+                    'trend_procent': week_trend_pct
+                }
+
+            # Znajdź tydzień szczytu i minimum (z niepustych)
+            non_zero_weeks = {k: v for k, v in data['weeks'].items() if v > 0}
+            peak_week_key = max(non_zero_weeks.keys(), key=lambda k: non_zero_weeks[k]) if non_zero_weeks else None
+            min_week_key = min(non_zero_weeks.keys(), key=lambda k: non_zero_weeks[k]) if non_zero_weeks else None
+
+            # Oblicz trend z ostatnich 3 lat
+            product_trend = trend_data.get(symbol, {})
+            current_year = end_date.year
+            years_data = {}
+            for y in range(current_year - 2, current_year + 1):
+                years_data[y] = product_trend.get(y, 0)
+
+            # Oblicz procentową zmianę trendu (rok bieżący vs rok poprzedni)
+            prev_year_sales = years_data.get(current_year - 1, 0)
+            curr_year_sales = years_data.get(current_year, 0)
+            if prev_year_sales > 0:
+                trend_percent = round(((curr_year_sales - prev_year_sales) / prev_year_sales) * 100, 1)
+            else:
+                trend_percent = 0 if curr_year_sales == 0 else 100
+
+            # Określ kierunek trendu
+            if trend_percent > 10:
+                trend_direction = 'up'
+            elif trend_percent < -10:
+                trend_direction = 'down'
+            else:
+                trend_direction = 'stable'
+
+            # Pobierz aktualny stan magazynowy
+            stan_aktualny = stock_data.get(symbol, 0)
+
+            results.append({
+                'Symbol': data['Symbol'],
+                'Nazwa': data['Nazwa'],
+                'Marka': data['Marka'],
+                'Rodzaj': data['Rodzaj'],
+                'Model': data['Model'],
+                'SumaRoczna': round(data['total_sold'], 0),
+                'SredniaTygodniowa': round(avg_weekly_sales, 2),
+                'TydzienSzczytu': peak_week_key,
+                'TydzienMinimum': min_week_key,
+                'DaneTygodniowe': weekly_data,
+                'StanAktualny': round(stan_aktualny, 0),
+                'Trend': {
+                    'lata': years_data,
+                    'zmiana_procent': trend_percent,
+                    'kierunek': trend_direction
+                }
+            })
+
+        # Sortuj po sumie rocznej malejąco
+        results.sort(key=lambda x: x['SumaRoczna'], reverse=True)
+
+        # Pobierz dostępne filtry
+        filters = {
+            'rodzaje': list(set(p['Rodzaj'] for p in results if p['Rodzaj'])),
+            'marki': list(set(p['Marka'] for p in results if p['Marka']))
+        }
+        filters['rodzaje'].sort()
+        filters['marki'].sort()
+
+        result = {
+            "success": True,
+            "data": results[:500],  # Limit do 500 produktów
+            "total_products": len(results),
+            "period": {
+                "start": start_date.strftime('%Y-%m-%d'),
+                "end": end_date.strftime('%Y-%m-%d')
+            },
+            "weeks": weeks_list,  # Lista 52 tygodni w kolejności chronologicznej
+            "filters": filters
+        }
+
+        # Zapisz do cache
+        seasonality_cache["data"][cache_key] = {
+            "result": result,
+            "timestamp": datetime.now()
+        }
+        print(f"[CACHE SAVE] Sezonowość - zapisano do cache dla klucza: {cache_key}")
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd podczas obliczania indeksu sezonowości: {str(e)}"
+        )
+
+
+# =============================================================================
+# IGNOROWANE PRODUKTY - Przechowywane w bazie danych
+# =============================================================================
+
+def init_ignored_products_table():
+    """Inicjalizuje tabelę ignorowanych produktów"""
+    try:
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ignored_products (
+                symbol TEXT PRIMARY KEY,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                added_by TEXT DEFAULT 'system'
+            )
+        """)
+        conn.commit()
+        conn.close()
+        print("[DB] Tabela ignored_products gotowa")
+    except Exception as e:
+        print(f"[DB] Błąd tworzenia tabeli ignored_products: {e}")
+
+
+# Inicjalizuj tabelę przy starcie
+init_ignored_products_table()
+
+
+@app.get("/api/ignored-products")
+async def get_ignored_products():
+    """Pobiera listę ignorowanych produktów"""
+    try:
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        cursor = conn.cursor()
+        cursor.execute("SELECT symbol, added_at FROM ignored_products ORDER BY added_at DESC")
+        rows = cursor.fetchall()
+        conn.close()
+
+        return {
+            "success": True,
+            "data": [row[0] for row in rows],  # Lista symboli
+            "details": [{"symbol": row[0], "added_at": row[1]} for row in rows]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd pobierania ignorowanych produktów: {str(e)}")
+
+
+@app.post("/api/ignored-products/{symbol}")
+async def add_ignored_product(symbol: str):
+    """Dodaje produkt do listy ignorowanych"""
+    try:
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO ignored_products (symbol, added_at)
+            VALUES (?, CURRENT_TIMESTAMP)
+        """, (symbol,))
+        conn.commit()
+        conn.close()
+
+        return {"success": True, "message": f"Produkt {symbol} dodany do ignorowanych"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd dodawania do ignorowanych: {str(e)}")
+
+
+@app.delete("/api/ignored-products/{symbol}")
+async def remove_ignored_product(symbol: str):
+    """Usuwa produkt z listy ignorowanych"""
+    try:
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM ignored_products WHERE symbol = ?", (symbol,))
+        affected = cursor.rowcount
+        conn.commit()
+        conn.close()
+
+        if affected == 0:
+            return {"success": False, "message": f"Produkt {symbol} nie był na liście ignorowanych"}
+
+        return {"success": True, "message": f"Produkt {symbol} usunięty z ignorowanych"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd usuwania z ignorowanych: {str(e)}")
+
+
+# ============================================
+# FOOTFALL - Pobieranie wejść z systemu AGIS
+# ============================================
+
+# Cache dla wejść (aktualizowane co godzinę)
+footfall_cache = {
+    "gls": None,
+    "jns": None,
+    "timestamp": None,
+    "jns_timestamp": None,
+    "cache_duration": 300  # 5 minut w sekundach
+}
+
+
+def fetch_footfall_from_agis():
+    """
+    Pobiera liczbę wejść z systemu AGIS (http://10.101.101.34/)
+    Loguje się i parsuje tabelę statystyk
+    """
+    try:
+        session = requests.Session()
+
+        # Logowanie
+        login_url = 'http://10.101.101.34/login.php?action=login'
+        login_data = {
+            'login': 'Krzysztof',
+            'password': 'QcBnID'
+        }
+
+        response = session.post(login_url, data=login_data, allow_redirects=True, timeout=15)
+
+        if response.status_code != 200:
+            print(f"[FOOTFALL] Błąd logowania: status {response.status_code}")
+            return None
+
+        # Pobierz stronę główną po logowaniu
+        main_page = session.get('http://10.101.101.34/', timeout=15)
+
+        if main_page.status_code != 200:
+            print(f"[FOOTFALL] Błąd pobierania strony: status {main_page.status_code}")
+            return None
+
+        # Parsuj HTML
+        soup = BeautifulSoup(main_page.text, 'html.parser')
+        tabela = soup.find(id='tabela_stat')
+
+        if not tabela:
+            print("[FOOTFALL] Nie znaleziono tabeli tabela_stat")
+            return None
+
+        rows = tabela.find_all('tr')
+
+        if len(rows) < 2:
+            print("[FOOTFALL] Tabela nie ma wystarczającej liczby wierszy")
+            return None
+
+        # Pobierz wartość z wiersza 1, kolumna 1 (wejścia dzienne)
+        wiersz = rows[1]
+        kolumny = wiersz.find_all('td')
+
+        if len(kolumny) < 2:
+            print("[FOOTFALL] Wiersz nie ma wystarczającej liczby kolumn")
+            return None
+
+        wartosc = kolumny[1].text.strip()
+
+        try:
+            wejscia = int(wartosc)
+            print(f"[FOOTFALL] Pobrano wejścia GLS: {wejscia}")
+            return wejscia
+        except ValueError:
+            print(f"[FOOTFALL] Nie można sparsować wartości: {wartosc}")
+            return None
+
+    except requests.exceptions.Timeout:
+        print("[FOOTFALL] Timeout podczas łączenia z AGIS")
+        return None
+    except Exception as e:
+        print(f"[FOOTFALL] Błąd: {e}")
+        return None
+
+
+def fetch_footfall_jns_from_topreports():
+    """
+    Pobiera liczbę wejść dla JNS (JEANS) z systemu TopReports
+    https://lee.topkey.pl:13443/TopReports/
+    """
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait, Select
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.chrome.service import Service
+    from webdriver_manager.chrome import ChromeDriverManager
+    import pandas as pd
+    import glob
+    import tempfile
+
+    DOWNLOAD_FOLDER = tempfile.gettempdir()
+
+    options = webdriver.ChromeOptions()
+    options.add_argument("--headless")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--ignore-certificate-errors")
+    options.add_argument("--window-size=1920,1080")
+    prefs = {"download.default_directory": DOWNLOAD_FOLDER}
+    options.add_experimental_option("prefs", prefs)
+
+    driver = None
+    ostatni_plik = None
+
+    try:
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+
+        # Logowanie
+        print("[FOOTFALL JNS] Logowanie na TopReports...")
+        driver.get("https://lee.topkey.pl:13443/TopReports/")
+
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "Email")))
+
+        driver.find_element(By.ID, "Email").send_keys("galeriajeans@sporting.com.pl")
+        driver.find_element(By.ID, "Password").send_keys("Wrangler1234.")
+
+        submit_button = driver.find_element(By.CSS_SELECTOR, "input.btn.btn-mainLogin, button[type='submit']")
+        driver.execute_script("arguments[0].click();", submit_button)
+
+        WebDriverWait(driver, 15).until(EC.url_contains("TopReports"))
+        print("[FOOTFALL JNS] Zalogowano pomyślnie.")
+        time.sleep(3)
+
+        # Przejdź do formularza raportu
+        driver.get("https://lee.topkey.pl:13443/TopReports/RepWizStandard4/Index")
+        time.sleep(3)
+
+        # Wybór daty "Dziś"
+        try:
+            wybierz_date = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.ID, "startDate"))
+            )
+            driver.execute_script("arguments[0].click();", wybierz_date)
+        except:
+            pass
+        time.sleep(1)
+
+        driver.execute_script("""
+            document.querySelectorAll('li.range').forEach(function(range) {
+                if (range.textContent.trim() === 'Dziś') range.click();
+            });
+        """)
+        time.sleep(0.5)
+
+        driver.execute_script("""
+            var elements = document.querySelectorAll('li, a, button, span, div');
+            for (var el of elements) {
+                if (el.textContent && el.textContent.trim() === 'Dziś') {
+                    el.click();
+                    break;
+                }
+            }
+        """)
+        time.sleep(0.5)
+
+        # Zaznacz checkbox obszaru
+        driver.execute_script("""
+            var spans = document.querySelectorAll('span.fancytree-title');
+            for (var span of spans) {
+                if (span.textContent.includes('PL000') || span.textContent.includes('Galeria Leszno')) {
+                    var checkbox = span.parentElement.querySelector('.fancytree-checkbox, .fancytree-radio');
+                    if (checkbox) {
+                        checkbox.click();
+                        return;
+                    }
+                }
+            }
+            var first = document.querySelector('span.fancytree-checkbox');
+            if (first) first.click();
+        """)
+        time.sleep(1)
+
+        # Wybór formatu XLS
+        try:
+            select_element = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.ID, "exportFileTypeList"))
+            )
+            driver.execute_script("arguments[0].scrollIntoView(true);", select_element)
+            select = Select(select_element)
+            select.select_by_visible_text("XLS (data only)")
+        except:
+            pass
+
+        # Eksport raportu
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+        time.sleep(1)
+
+        try:
+            export_button = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.ID, "exportRepButton"))
+            )
+            driver.execute_script("arguments[0].click();", export_button)
+        except:
+            driver.execute_script("document.getElementById('exportRepButton').click();")
+
+        print("[FOOTFALL JNS] Czekam na pobranie pliku...")
+        time.sleep(15)
+
+        # Znajdź pobrany plik
+        pattern = os.path.join(DOWNLOAD_FOLDER, "*.xls*")
+        list_of_files = glob.glob(pattern)
+        if list_of_files:
+            ostatni_plik = max(list_of_files, key=os.path.getctime)
+            print(f"[FOOTFALL JNS] Pobrano plik: {ostatni_plik}")
+
+            # Odczytaj wartość
+            df = pd.read_excel(ostatni_plik, sheet_name=0)
+
+            # Szukaj wartości w B10
+            try:
+                wartosc_b10 = df.iloc[8, 1]
+                if pd.notna(wartosc_b10):
+                    wejscia = int(float(wartosc_b10))
+                    print(f"[FOOTFALL JNS] Wejścia: {wejscia}")
+                    return wejscia
+            except:
+                pass
+
+            # Fallback - szukaj "Suma"
+            for idx, row in df.iterrows():
+                for col_idx, cell in enumerate(row):
+                    if str(cell).strip().lower() == 'suma':
+                        if col_idx + 1 < len(row):
+                            val = row.iloc[col_idx + 1]
+                            if pd.notna(val):
+                                return int(float(val))
+
+        return None
+
+    except Exception as e:
+        print(f"[FOOTFALL JNS] Błąd: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+    finally:
+        if driver:
+            driver.quit()
+        if ostatni_plik and os.path.exists(ostatni_plik):
+            try:
+                os.remove(ostatni_plik)
+            except:
+                pass
+
+
+def save_footfall_to_db(wejscia: int, store: str = "GLS"):
+    """Zapisuje wejścia do bazy SQLite"""
+    try:
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        cursor = conn.cursor()
+
+        # Utwórz tabelę jeśli nie istnieje
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS footfall (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                store TEXT NOT NULL,
+                date TEXT NOT NULL,
+                hour INTEGER NOT NULL,
+                wejscia INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(store, date, hour)
+            )
+        """)
+
+        now = datetime.now()
+        date_str = now.strftime('%Y-%m-%d')
+        hour = now.hour
+
+        # Wstaw lub zaktualizuj
+        cursor.execute("""
+            INSERT OR REPLACE INTO footfall (store, date, hour, wejscia)
+            VALUES (?, ?, ?, ?)
+        """, (store, date_str, hour, wejscia))
+
+        conn.commit()
+        conn.close()
+        print(f"[FOOTFALL] Zapisano do bazy: {store} {date_str} {hour}:00 = {wejscia}")
+        return True
+    except Exception as e:
+        print(f"[FOOTFALL] Błąd zapisu do bazy: {e}")
+        return False
+
+
+def get_today_footfall(store: str = "GLS"):
+    """Pobiera sumę dzisiejszych wejść z bazy"""
+    try:
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        cursor = conn.cursor()
+
+        today = datetime.now().strftime('%Y-%m-%d')
+
+        # Pobierz ostatni (najnowszy) wpis z dzisiaj - to jest suma narastająca
+        cursor.execute("""
+            SELECT wejscia, hour FROM footfall
+            WHERE store = ? AND date = ?
+            ORDER BY hour DESC
+            LIMIT 1
+        """, (store, today))
+
+        row = cursor.fetchone()
+        conn.close()
+
+        if row:
+            return {"wejscia": row[0], "last_hour": row[1]}
+        return {"wejscia": 0, "last_hour": None}
+    except Exception as e:
+        print(f"[FOOTFALL] Błąd odczytu z bazy: {e}")
+        return {"wejscia": 0, "last_hour": None}
+
+
+@app.get("/api/footfall")
+async def get_footfall(refresh: bool = False):
+    """
+    Pobiera liczbę wejść dla GLS z systemu AGIS oraz JNS z TopReports.
+    - refresh: jeśli True, wymusza pobranie nowych danych
+
+    Dane są cachowane przez 5 minut.
+    """
+    try:
+        now = time.time()
+        result_data = {}
+        sources = {}
+
+        # === GLS z AGIS ===
+        if not refresh and footfall_cache["timestamp"]:
+            cache_age = now - footfall_cache["timestamp"]
+            if cache_age < footfall_cache["cache_duration"] and footfall_cache["gls"] is not None:
+                result_data["GLS"] = footfall_cache["gls"]
+                sources["GLS"] = "cache"
+            else:
+                wejscia_gls = fetch_footfall_from_agis()
+                if wejscia_gls is not None:
+                    footfall_cache["gls"] = wejscia_gls
+                    footfall_cache["timestamp"] = now
+                    save_footfall_to_db(wejscia_gls, "GLS")
+                    result_data["GLS"] = wejscia_gls
+                    sources["GLS"] = "agis"
+                else:
+                    db_data = get_today_footfall("GLS")
+                    result_data["GLS"] = db_data["wejscia"]
+                    sources["GLS"] = "database"
+        else:
+            wejscia_gls = fetch_footfall_from_agis()
+            if wejscia_gls is not None:
+                footfall_cache["gls"] = wejscia_gls
+                footfall_cache["timestamp"] = now
+                save_footfall_to_db(wejscia_gls, "GLS")
+                result_data["GLS"] = wejscia_gls
+                sources["GLS"] = "agis"
+            else:
+                db_data = get_today_footfall("GLS")
+                result_data["GLS"] = db_data["wejscia"]
+                sources["GLS"] = "database"
+
+        # === JNS z TopReports ===
+        if not refresh and footfall_cache["jns_timestamp"]:
+            cache_age_jns = now - footfall_cache["jns_timestamp"]
+            if cache_age_jns < footfall_cache["cache_duration"] and footfall_cache["jns"] is not None:
+                result_data["JNS"] = footfall_cache["jns"]
+                sources["JNS"] = "cache"
+            else:
+                wejscia_jns = fetch_footfall_jns_from_topreports()
+                if wejscia_jns is not None:
+                    footfall_cache["jns"] = wejscia_jns
+                    footfall_cache["jns_timestamp"] = now
+                    save_footfall_to_db(wejscia_jns, "JNS")
+                    result_data["JNS"] = wejscia_jns
+                    sources["JNS"] = "topreports"
+                else:
+                    db_data = get_today_footfall("JNS")
+                    result_data["JNS"] = db_data["wejscia"]
+                    sources["JNS"] = "database"
+        else:
+            wejscia_jns = fetch_footfall_jns_from_topreports()
+            if wejscia_jns is not None:
+                footfall_cache["jns"] = wejscia_jns
+                footfall_cache["jns_timestamp"] = now
+                save_footfall_to_db(wejscia_jns, "JNS")
+                result_data["JNS"] = wejscia_jns
+                sources["JNS"] = "topreports"
+            else:
+                db_data = get_today_footfall("JNS")
+                result_data["JNS"] = db_data["wejscia"]
+                sources["JNS"] = "database"
+
+        return {
+            "success": True,
+            "data": result_data,
+            "sources": sources,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        print(f"[FOOTFALL API] Błąd: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "data": {"GLS": 0, "JNS": 0}
+        }
+
+
+@app.post("/api/footfall/sync")
+async def sync_footfall():
+    """Wymusza synchronizację wejść z systemu AGIS (GLS) i TopReports (JNS)"""
+    results = {}
+
+    # Sync GLS z AGIS
+    wejscia_gls = fetch_footfall_from_agis()
+    if wejscia_gls is not None:
+        save_footfall_to_db(wejscia_gls, "GLS")
+        footfall_cache["gls"] = wejscia_gls
+        footfall_cache["timestamp"] = time.time()
+        results["GLS"] = wejscia_gls
+    else:
+        results["GLS"] = None
+
+    # Sync JNS z TopReports
+    wejscia_jns = fetch_footfall_jns_from_topreports()
+    if wejscia_jns is not None:
+        save_footfall_to_db(wejscia_jns, "JNS")
+        footfall_cache["jns"] = wejscia_jns
+        footfall_cache["jns_timestamp"] = time.time()
+        results["JNS"] = wejscia_jns
+    else:
+        results["JNS"] = None
+
+    if results["GLS"] is not None or results["JNS"] is not None:
+        return {
+            "success": True,
+            "message": f"Zsynchronizowano wejścia - GLS: {results['GLS']}, JNS: {results['JNS']}",
+            "data": results
+        }
+    else:
+        raise HTTPException(
+            status_code=500,
+            detail="Nie udało się pobrać danych z żadnego systemu"
         )
 
 

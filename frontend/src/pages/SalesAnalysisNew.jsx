@@ -57,13 +57,30 @@ function SalesAnalysisNew() {
     setLoading(true);
     try {
       const magIds = selectedMagazyny.join(',');
-      const url = `${API_URL}/api/sales-history?period=${period}&start_date=${startDate}&end_date=${endDate}&mag_ids=${magIds}`;
+      // Wybierz grupowanie w zależności od okresu
+      let groupBy = 'day';
+      if (period === 'monthly' || period === 'yearly') groupBy = 'month';
+      else if (period === 'weekly') groupBy = 'week';
+
+      // Używamy sales-items-trend (live z SQL Server) zamiast sales-history (SQLite)
+      const url = `${API_URL}/api/sales-items-trend?start_date=${startDate}&end_date=${endDate}&mag_ids=${magIds}&group_by=${groupBy}`;
       const response = await fetch(url);
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
       const result = await response.json();
-      setSalesData(result.data || []);
+
+      // Mapowanie danych - Data -> DataSprzedazy dla kompatybilności z istniejącymi komponentami
+      const mappedData = (result.data || []).map(item => ({
+        DataSprzedazy: item.Data,
+        IloscSprzedana: item.IloscSprzedana,
+        WartoscNetto: item.WartoscNetto,
+        WartoscBrutto: item.WartoscBrutto,
+        LiczbaTransakcji: item.LiczbaTransakcji,
+        LiczbaProduktow: item.LiczbaProduktow
+      }));
+
+      setSalesData(mappedData);
     } catch (error) {
       setError(error);
       console.error("Błąd podczas pobierania historii sprzedaży:", error);

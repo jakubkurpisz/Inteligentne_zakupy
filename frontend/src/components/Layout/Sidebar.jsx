@@ -9,105 +9,150 @@ import {
   Package,
   Calendar,
   ClipboardList,
-  DollarSign
+  DollarSign,
+  Sun,
+  BarChart3,
+  Warehouse,
+  ShoppingBag
 } from 'lucide-react'
 
-const menuItems = [
+// Struktura menu z sekcjami
+const menuStructure = [
   {
+    type: 'item',
     path: '/',
     icon: LayoutDashboard,
-    label: 'Dashboard',
-    description: 'Przegląd ogólny'
+    label: 'Dashboard'
   },
   {
-    path: '/sales-analysis',
-    icon: TrendingUp,
-    label: 'Analiza Sprzedaży',
-    description: 'Historia transakcji'
+    type: 'section',
+    label: 'Sprzedaż',
+    icon: BarChart3,
+    items: [
+      {
+        path: '/sales-analysis',
+        icon: TrendingUp,
+        label: 'Analiza Sprzedaży'
+      },
+      {
+        path: '/sales-plans',
+        icon: Calendar,
+        label: 'Plany Sprzedażowe'
+      },
+      {
+        path: '/demand-forecast',
+        icon: LineChart,
+        label: 'Prognozowanie'
+      }
+    ]
   },
   {
-    path: '/stany-magazynowe',
-    icon: Package,
-    label: 'Stany Magazynowe',
-    description: 'Produkty w magazynie'
+    type: 'section',
+    label: 'Magazyn',
+    icon: Warehouse,
+    items: [
+      {
+        path: '/stany-magazynowe',
+        icon: Package,
+        label: 'Stany Magazynowe'
+      },
+      {
+        path: '/dead-stock',
+        icon: AlertTriangle,
+        label: 'Martwe Stany'
+      },
+      {
+        path: '/warehouse-rotation',
+        icon: DollarSign,
+        label: 'Rotacja Magazynu'
+      }
+    ]
   },
   {
-    path: '/demand-forecast',
-    icon: LineChart,
-    label: 'Prognozowanie',
-    description: 'Przewidywanie popytu'
+    type: 'section',
+    label: 'Zakupy',
+    icon: ShoppingBag,
+    items: [
+      {
+        path: '/seasonality',
+        icon: Sun,
+        label: 'Sezonowość'
+      },
+      {
+        path: '/purchase-proposals',
+        icon: ClipboardList,
+        label: 'Suplementy'
+      },
+      {
+        path: '/purchase-suggestions',
+        icon: ShoppingCart,
+        label: 'Koordynowanie Zakupów'
+      }
+    ]
   },
   {
-    path: '/purchase-suggestions',
-    icon: ShoppingCart,
-    label: 'Sugestie Zakupów',
-    description: 'Rekomendacje AI'
-  },
-  {
-    path: '/purchase-proposals',
-    icon: ClipboardList,
-    label: 'Propozycje Zakupowe',
-    description: 'Suplementy - stany min.'
-  },
-  {
-    path: '/dead-stock',
-    icon: AlertTriangle,
-    label: 'Martwe Stany',
-    description: 'Analiza rotacji zapasów'
-  },
-  {
-    path: '/warehouse-rotation',
-    icon: DollarSign,
-    label: 'Rotacja Magazynu',
-    description: 'Analiza wartości'
-  },
-  {
-    path: '/sales-plans',
-    icon: Calendar,
-    label: 'Plany Sprzedażowe',
-    description: 'Zarządzanie planami'
-  },
-  {
+    type: 'item',
     path: '/settings',
     icon: Settings,
-    label: 'Ustawienia',
-    description: 'Konfiguracja systemu'
+    label: 'Ustawienia'
   }
 ]
 
 function Sidebar({ isOpen }) {
   const location = useLocation()
 
+  const renderMenuItem = (item, isSubItem = false) => {
+    const Icon = item.icon
+    const isActive = location.pathname === item.path
+
+    return (
+      <Link
+        key={item.path}
+        to={item.path}
+        className={`flex items-center space-x-2 px-3 py-1.5 rounded-md transition-all ${
+          isSubItem ? 'ml-4' : ''
+        } ${
+          isActive
+            ? 'bg-primary-50 text-primary-700 border-l-2 border-primary-600'
+            : 'text-gray-700 hover:bg-gray-50'
+        }`}
+      >
+        <Icon className={`w-4 h-4 ${isActive ? 'text-primary-600' : 'text-gray-500'}`} />
+        <span className={`text-sm ${isActive ? 'font-medium text-primary-700' : 'text-gray-700'}`}>
+          {item.label}
+        </span>
+      </Link>
+    )
+  }
+
   return (
     <aside
       className={`fixed left-0 top-16 h-[calc(100vh-4rem)] bg-white border-r border-gray-200 transition-all duration-300 ${
-        isOpen ? 'w-64' : 'w-0'
-      } overflow-hidden`}
+        isOpen ? 'w-56' : 'w-0'
+      } overflow-y-auto overflow-x-hidden`}
     >
-      <nav className="p-4 space-y-2">
-        {menuItems.map((item) => {
-          const Icon = item.icon
-          const isActive = location.pathname === item.path
+      <nav className="p-2 space-y-1">
+        {menuStructure.map((entry, index) => {
+          if (entry.type === 'item') {
+            return renderMenuItem(entry)
+          }
 
-          return (
-            <Link
-              key={item.path}
-              to={item.path}
-              className={`flex items-center space-x-3 px-4 py-3 rounded-lg transition-all ${
-                isActive
-                  ? 'bg-primary-50 text-primary-700 border-l-4 border-primary-600'
-                  : 'text-gray-700 hover:bg-gray-50'
-              }`}
-            >
-              <Icon className={`w-5 h-5 ${isActive ? 'text-primary-600' : 'text-gray-500'}`} />
-              <div className="flex-1 min-w-0">
-                <p className={`text-sm font-medium ${isActive ? 'text-primary-700' : 'text-gray-900'}`}>
-                  {item.label}
-                </p>
-                <p className="text-xs text-gray-500 truncate">{item.description}</p>
+          if (entry.type === 'section') {
+            const SectionIcon = entry.icon
+            return (
+              <div key={entry.label} className={index > 0 ? 'pt-2' : ''}>
+                <div className="flex items-center space-x-2 px-3 py-1 text-xs font-semibold text-gray-400 uppercase tracking-wider">
+                  <SectionIcon className="w-3 h-3" />
+                  <span>{entry.label}</span>
+                </div>
+                <div className="space-y-0.5">
+                  {entry.items.map(item => renderMenuItem(item, true))}
+                </div>
               </div>
-            </Link>
-          )
+            )
+          }
+
+          return null
         })}
       </nav>
     </aside>

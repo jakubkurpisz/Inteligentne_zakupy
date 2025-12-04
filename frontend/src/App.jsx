@@ -9,6 +9,7 @@ import DeadStock from './pages/DeadStock'
 import WarehouseRotation from './pages/WarehouseRotation'
 import SalesPlans from './pages/SalesPlans'
 import PurchaseProposals from './pages/PurchaseProposals'
+import SeasonalityAnalysis from './pages/SeasonalityAnalysis'
 import Settings from './pages/Settings'
 
 function App() {
@@ -25,6 +26,7 @@ function App() {
           <Route path="/dead-stock" element={<DeadStock />} />
           <Route path="/warehouse-rotation" element={<WarehouseRotation />} />
           <Route path="/sales-plans" element={<SalesPlans />} />
+          <Route path="/seasonality" element={<SeasonalityAnalysis />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </Layout>

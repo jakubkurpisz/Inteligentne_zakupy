@@ -40,7 +40,7 @@ function SalesPlans() {
   const [filters, setFilters] = useState({
     startDate: '',
     endDate: '',
-    view: 'all' // 'all', 'month', 'week'
+    view: 'month' // 'all', 'month', 'week' - domyślnie aktualny miesiąc
   })
 
   // Pobierz dane planów
@@ -109,9 +109,19 @@ function SalesPlans() {
     }
   }
 
-  // Pobierz dane przy montowaniu komponentu
+  // Przy montowaniu komponentu - zastosuj domyślny filtr (aktualny miesiąc)
   useEffect(() => {
-    fetchPlans()
+    // Wywołaj applyViewFilter() - to ustawi daty i wywoła fetchPlans przez drugi useEffect
+    const today = new Date()
+    const monthStart = new Date(today.getFullYear(), today.getMonth(), 1)
+    const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0)
+    const formatDate = (d) => {
+      const day = String(d.getDate()).padStart(2, '0')
+      const month = String(d.getMonth() + 1).padStart(2, '0')
+      const year = d.getFullYear()
+      return `${day}.${month}.${year}`
+    }
+    setFilters(prev => ({ ...prev, startDate: formatDate(monthStart), endDate: formatDate(monthEnd) }))
   }, [])
 
   // Przygotuj dane do wykresów

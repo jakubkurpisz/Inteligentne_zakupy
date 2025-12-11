@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react'
-import { Package, Search, Filter, TrendingUp, AlertCircle, Warehouse, ChevronDown, ChevronUp, HelpCircle, X, DollarSign } from 'lucide-react'
+import { Package, Search, Filter, TrendingUp, AlertCircle, Warehouse, ChevronDown, ChevronUp, HelpCircle, X, DollarSign, RotateCcw } from 'lucide-react'
 import { BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import { API_BASE_URL } from '../config/api'
+import { useResizableColumns } from '../hooks/useResizableColumns'
 
 // Cache helpers
 const CACHE_KEY = 'stanyMagazynowe_cache';
@@ -32,6 +33,13 @@ function StanyMagazynowe() {
   const [seasonalityLoading, setSeasonalityLoading] = useState(true);
   const [warehouseTotals, setWarehouseTotals] = useState(() => getFromCache('warehouseTotals', null));
   const [showHelp, setShowHelp] = useState(false);
+
+  // Resizable columns
+  const { getColumnStyle, ResizeHandle, resetWidths } = useResizableColumns({
+    symbol: 100, nazwa: 200, marka: 80, stan: 70, cenaZakupu: 90,
+    cenaSprzedazy: 100, vat: 50, wartZakupu: 90, wartSprzedazy: 100,
+    sezonowosc: 100, kategoria: 100
+  }, 'stanyMagazynowe_columns', 50);
 
   // Mapowanie magazynów
   const magazyny = {
@@ -487,46 +495,124 @@ function StanyMagazynowe() {
           </span>
         </div>
         <div className="overflow-x-auto">
-          <table className="min-w-full bg-white">
+          <div className="flex justify-end mb-2">
+            <button
+              onClick={resetWidths}
+              className="flex items-center gap-1 px-2 py-1 text-xs text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded"
+              title="Resetuj szerokość kolumn"
+            >
+              <RotateCcw size={12} />
+              Reset kolumn
+            </button>
+          </div>
+          <table className="min-w-full bg-white table-fixed">
             <thead className="bg-gray-50">
               <tr>
-                <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600">Symbol</th>
-                <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600">Nazwa</th>
-                <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600">Marka</th>
+                <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600 relative" style={getColumnStyle('symbol')}>
+                  Symbol
+                  <ResizeHandle columnKey="symbol" />
+                </th>
+                <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600 relative" style={getColumnStyle('nazwa')}>
+                  Nazwa
+                  <ResizeHandle columnKey="nazwa" />
+                </th>
+                <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600 relative" style={getColumnStyle('marka')}>
+                  Marka
+                  <ResizeHandle columnKey="marka" />
+                </th>
                 <th
-                  className="py-3 px-3 border-b text-right text-sm font-semibold text-gray-600 cursor-pointer hover:bg-gray-100"
+                  className="py-3 px-3 border-b text-right text-sm font-semibold text-gray-600 cursor-pointer hover:bg-gray-100 relative"
                   onClick={() => handleSort('Stan')}
+                  style={getColumnStyle('stan')}
                 >
                   Stan <SortIcon columnKey="Stan" />
+                  <ResizeHandle columnKey="stan" />
                 </th>
                 <th
-                  className="py-3 px-3 border-b text-right text-sm font-semibold text-blue-600 cursor-pointer hover:bg-gray-100"
+                  className="py-3 px-3 border-b text-right text-sm font-semibold text-blue-600 cursor-pointer hover:bg-gray-100 relative"
                   onClick={() => handleSort('CenaZakupuNetto')}
+                  style={getColumnStyle('cenaZakupu')}
                 >
                   Zakup Netto <SortIcon columnKey="CenaZakupuNetto" />
+                  <ResizeHandle columnKey="cenaZakupu" />
                 </th>
                 <th
-                  className="py-3 px-3 border-b text-right text-sm font-semibold text-green-600 cursor-pointer hover:bg-gray-100"
+                  className="py-3 px-3 border-b text-right text-sm font-semibold text-green-600 cursor-pointer hover:bg-gray-100 relative"
                   onClick={() => handleSort('DetalicznaBrutto')}
+                  style={getColumnStyle('cenaSprzedazy')}
                 >
                   Sprzedaż Brutto <SortIcon columnKey="DetalicznaBrutto" />
+                  <ResizeHandle columnKey="cenaSprzedazy" />
                 </th>
                 <th
-                  className="py-3 px-3 border-b text-right text-sm font-semibold text-blue-800 cursor-pointer hover:bg-gray-100"
+                  className="py-3 px-3 border-b text-center text-sm font-semibold text-gray-600 cursor-pointer hover:bg-gray-100 relative"
+                  onClick={() => handleSort('StawkaVAT')}
+                  style={getColumnStyle('vat')}
+                >
+                  VAT <SortIcon columnKey="StawkaVAT" />
+                  <ResizeHandle columnKey="vat" />
+                </th>
+                <th
+                  className="py-3 px-3 border-b text-right text-sm font-semibold text-blue-800 cursor-pointer hover:bg-gray-100 relative"
                   onClick={() => handleSort('WartoscZakupu')}
+                  style={getColumnStyle('wartZakupu')}
                 >
                   Wart. zakupu <SortIcon columnKey="WartoscZakupu" />
+                  <ResizeHandle columnKey="wartZakupu" />
                 </th>
                 <th
-                  className="py-3 px-3 border-b text-right text-sm font-semibold text-green-800 cursor-pointer hover:bg-gray-100"
+                  className="py-3 px-3 border-b text-right text-sm font-semibold text-green-800 cursor-pointer hover:bg-gray-100 relative"
                   onClick={() => handleSort('WartoscSprzedazy')}
+                  style={getColumnStyle('wartSprzedazy')}
                 >
                   Wart. sprzedaży <SortIcon columnKey="WartoscSprzedazy" />
+                  <ResizeHandle columnKey="wartSprzedazy" />
                 </th>
-                <th className="py-3 px-3 border-b text-center text-sm font-semibold text-purple-700" title="Sezonowość produktu na podstawie CV (Współczynnik zmienności) z ostatnich 12 miesięcy. STABILNY: CV<20%, ZMIENNY: 20-50%, SEZONOWY: >50%">
-                  Sezonowość
+                <th className="py-3 px-3 border-b text-center text-sm font-semibold text-purple-700 relative" style={getColumnStyle('sezonowosc')}>
+                  <div className="flex items-center justify-center gap-1">
+                    <span>Sezonowość</span>
+                    <div className="relative group/tooltip">
+                      <AlertCircle className="w-4 h-4 text-gray-400 hover:text-purple-600 cursor-help" />
+                      <div className="absolute top-full right-0 mt-2 hidden group-hover/tooltip:block w-64 z-[100]">
+                        <div className="bg-gray-900 text-white text-xs rounded-lg p-3 shadow-xl border border-gray-700">
+                          <div className="absolute -top-2 right-4">
+                            <div className="border-8 border-transparent border-b-gray-900"></div>
+                          </div>
+                          <p className="font-semibold mb-2 text-purple-300 text-left">Zmienność popytu (CV)</p>
+                          <p className="mb-3 text-gray-300 text-left leading-relaxed">Pokazuje jak bardzo sprzedaż produktu waha się w ciągu roku:</p>
+                          <div className="space-y-2 text-left">
+                            <div className="flex items-start gap-2">
+                              <span className="text-green-400 text-base">●</span>
+                              <div>
+                                <span className="font-medium text-green-400">Stabilny (&lt;20%)</span>
+                                <p className="text-gray-400 mt-0.5">Równomierna sprzedaż</p>
+                              </div>
+                            </div>
+                            <div className="flex items-start gap-2">
+                              <span className="text-yellow-400 text-base">◐</span>
+                              <div>
+                                <span className="font-medium text-yellow-400">Zmienny (20-50%)</span>
+                                <p className="text-gray-400 mt-0.5">Sprzedaż się waha</p>
+                              </div>
+                            </div>
+                            <div className="flex items-start gap-2">
+                              <span className="text-red-400 text-base">◑</span>
+                              <div>
+                                <span className="font-medium text-red-400">Sezonowy (&gt;50%)</span>
+                                <p className="text-gray-400 mt-0.5">Duże wahania sezonowe</p>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <ResizeHandle columnKey="sezonowosc" />
                 </th>
-                <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600">Kategoria</th>
+                <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600 relative" style={getColumnStyle('kategoria')}>
+                  Kategoria
+                  <ResizeHandle columnKey="kategoria" />
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -548,6 +634,9 @@ function StanyMagazynowe() {
                     </td>
                     <td className="py-2 px-3 border-b text-sm text-green-700 text-right font-medium">
                       {formatNumber(cenaSprzedazyBrutto)} zł
+                    </td>
+                    <td className="py-2 px-3 border-b text-sm text-gray-700 text-center">
+                      {product.StawkaVAT ? `${formatNumber(product.StawkaVAT, 0)}%` : '-'}
                     </td>
                     <td className="py-2 px-3 border-b text-sm text-blue-800 text-right font-semibold">
                       {cenaZakupuNetto > 0 ? `${formatNumber(wartoscZakupu)} zł` : '-'}

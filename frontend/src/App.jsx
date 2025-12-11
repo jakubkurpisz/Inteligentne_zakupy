@@ -11,6 +11,7 @@ import SalesPlans from './pages/SalesPlans'
 import PurchaseProposals from './pages/PurchaseProposals'
 import SeasonalityAnalysis from './pages/SeasonalityAnalysis'
 import Settings from './pages/Settings'
+import MinimalStocks from './pages/MinimalStocks'
 
 function App() {
   return (
@@ -27,6 +28,7 @@ function App() {
           <Route path="/warehouse-rotation" element={<WarehouseRotation />} />
           <Route path="/sales-plans" element={<SalesPlans />} />
           <Route path="/seasonality" element={<SeasonalityAnalysis />} />
+          <Route path="/minimal-stocks" element={<MinimalStocks />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </Layout>

@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react'
-import { Calendar, TrendingUp, Filter, RefreshCw, Warehouse, Package, ChevronDown, ChevronUp, HelpCircle, X } from 'lucide-react'
+import React, { useState, useEffect, useCallback } from 'react'
+import { Calendar, TrendingUp, Filter, RefreshCw, Warehouse, Package, ChevronDown, ChevronUp, HelpCircle, X, RotateCcw } from 'lucide-react'
 import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import { API_BASE_URL } from '../config/api'
+import { useResizableColumns } from '../hooks/useResizableColumns'
 
 function SalesAnalysisNew() {
   const API_URL = API_BASE_URL;
@@ -18,6 +19,8 @@ function SalesAnalysisNew() {
   const [salesItemsLoading, setSalesItemsLoading] = useState(false);
   const [salesItemsError, setSalesItemsError] = useState(null);
   const [availableFilters, setAvailableFilters] = useState({ rodzaje: [], przeznaczenia: [], marki: [] });
+  const [dynamicOptions, setDynamicOptions] = useState({ rodzaj: [], przeznaczenie: [], marka: [] });
+  const [loadingDynamicOptions, setLoadingDynamicOptions] = useState(false);
   const [selectedRodzaj, setSelectedRodzaj] = useState('');
   const [selectedPrzeznaczenie, setSelectedPrzeznaczenie] = useState('');
   const [selectedMarka, setSelectedMarka] = useState('');
@@ -34,6 +37,17 @@ function SalesAnalysisNew() {
 
   // Stan dla okna pomocy
   const [showHelp, setShowHelp] = useState(false);
+
+  // Resizable columns dla tabeli produktów
+  const { getColumnStyle, ResizeHandle, resetWidths } = useResizableColumns({
+    symbol: 120,
+    nazwa: 250,
+    marka: 100,
+    rodzaj: 120,
+    przeznaczenie: 120,
+    ilosc: 80,
+    wartosc: 120
+  }, 'salesAnalysis_columns', 50);
 
   // Mapowanie magazynów
   const magazyny = {
@@ -163,6 +177,12 @@ function SalesAnalysisNew() {
         if (response.ok) {
           const filters = await response.json();
           setAvailableFilters(filters);
+          // Ustaw początkowe dynamiczne opcje
+          setDynamicOptions({
+            rodzaj: filters.rodzaje || [],
+            przeznaczenie: filters.przeznaczenia || [],
+            marka: filters.marki || []
+          });
         }
       } catch (error) {
         console.error("Błąd podczas pobierania filtrów:", error);
@@ -170,6 +190,55 @@ function SalesAnalysisNew() {
     };
     fetchFilters();
   }, [API_URL]);
+
+  // Pobierz dynamiczne opcje filtrów na podstawie wybranych wartości
+  const fetchDynamicOptions = useCallback(async () => {
+    try {
+      setLoadingDynamicOptions(true);
+      const response = await fetch(`${API_URL}/api/products/filter-options-dynamic`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rodzaj: selectedRodzaj ? [selectedRodzaj] : [],
+          przeznaczenie: selectedPrzeznaczenie ? [selectedPrzeznaczenie] : [],
+          marka: selectedMarka ? [selectedMarka] : []
+        })
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        if (result.success && result.data) {
+          setDynamicOptions({
+            rodzaj: result.data.rodzaj || availableFilters.rodzaje,
+            przeznaczenie: result.data.przeznaczenie || availableFilters.przeznaczenia,
+            marka: result.data.marka || availableFilters.marki
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Błąd pobierania dynamicznych opcji:', error);
+    } finally {
+      setLoadingDynamicOptions(false);
+    }
+  }, [selectedRodzaj, selectedPrzeznaczenie, selectedMarka, availableFilters, API_URL]);
+
+  // Debounce - pobierz dynamiczne opcje po 300ms od ostatniej zmiany
+  useEffect(() => {
+    const hasAnyFilter = selectedRodzaj || selectedPrzeznaczenie || selectedMarka;
+    if (hasAnyFilter) {
+      const timer = setTimeout(() => {
+        fetchDynamicOptions();
+      }, 300);
+      return () => clearTimeout(timer);
+    } else {
+      // Jeśli nie ma filtrów, pokaż wszystkie opcje
+      setDynamicOptions({
+        rodzaj: availableFilters.rodzaje || [],
+        przeznaczenie: availableFilters.przeznaczenia || [],
+        marka: availableFilters.marki || []
+      });
+    }
+  }, [selectedRodzaj, selectedPrzeznaczenie, selectedMarka, availableFilters]);
 
   // Pobierz listę produktów gdy zmienią się daty lub filtry
   useEffect(() => {
@@ -654,11 +723,18 @@ function SalesAnalysisNew() {
 
         {showItemsSection && (
           <>
-            {/* Filtry produktów */}
+            {/* Filtry produktów z dynamicznym zawężaniem */}
             <div className="border-t border-b py-4 mb-4 bg-gray-50 -mx-6 px-6">
               <div className="flex items-center space-x-3 mb-3">
                 <Filter className="w-5 h-5 text-gray-400" />
                 <span className="text-sm font-medium text-gray-700">Filtry produktów:</span>
+                {loadingDynamicOptions && (
+                  <span className="ml-2 text-xs text-blue-600 flex items-center gap-1">
+                    <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-blue-600"></div>
+                    Aktualizuję opcje...
+                  </span>
+                )}
+                <span className="text-xs text-blue-600 ml-auto">Listy zawężają się automatycznie</span>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {/* Filtr Rodzaj */}
@@ -670,7 +746,7 @@ function SalesAnalysisNew() {
                     className="w-full p-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500"
                   >
                     <option value="">Wszystkie rodzaje</option>
-                    {availableFilters.rodzaje.map(rodzaj => (
+                    {dynamicOptions.rodzaj.map(rodzaj => (
                       <option key={rodzaj} value={rodzaj}>{rodzaj}</option>
                     ))}
                   </select>
@@ -685,7 +761,7 @@ function SalesAnalysisNew() {
                     className="w-full p-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500"
                   >
                     <option value="">Wszystkie przeznaczenia</option>
-                    {availableFilters.przeznaczenia.map(prz => (
+                    {dynamicOptions.przeznaczenie.map(prz => (
                       <option key={prz} value={prz}>{prz}</option>
                     ))}
                   </select>
@@ -700,7 +776,7 @@ function SalesAnalysisNew() {
                     className="w-full p-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500"
                   >
                     <option value="">Wszystkie marki</option>
-                    {availableFilters.marki.map(marka => (
+                    {dynamicOptions.marka.map(marka => (
                       <option key={marka} value={marka}>{marka}</option>
                     ))}
                   </select>
@@ -850,25 +926,54 @@ function SalesAnalysisNew() {
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="min-w-full bg-white">
+                <div className="flex justify-end mb-2">
+                  <button
+                    onClick={resetWidths}
+                    className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1"
+                    title="Resetuj szerokości kolumn"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    Reset kolumn
+                  </button>
+                </div>
+                <table className="min-w-full bg-white table-fixed">
                   <thead className="bg-gray-50">
                     <tr>
-                      <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600">Symbol</th>
-                      <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600">Nazwa</th>
-                      <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600">Marka</th>
-                      <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600">Rodzaj</th>
-                      <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600">Przeznaczenie</th>
-                      <th
-                        className="py-3 px-3 border-b text-right text-sm font-semibold text-gray-600 cursor-pointer hover:bg-gray-100"
-                        onClick={() => handleSort('IloscSprzedana')}
-                      >
-                        Ilość <SortIcon columnKey="IloscSprzedana" />
+                      <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600 relative" style={getColumnStyle('symbol')}>
+                        Symbol
+                        <ResizeHandle columnKey="symbol" />
+                      </th>
+                      <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600 relative" style={getColumnStyle('nazwa')}>
+                        Nazwa
+                        <ResizeHandle columnKey="nazwa" />
+                      </th>
+                      <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600 relative" style={getColumnStyle('marka')}>
+                        Marka
+                        <ResizeHandle columnKey="marka" />
+                      </th>
+                      <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600 relative" style={getColumnStyle('rodzaj')}>
+                        Rodzaj
+                        <ResizeHandle columnKey="rodzaj" />
+                      </th>
+                      <th className="py-3 px-3 border-b text-left text-sm font-semibold text-gray-600 relative" style={getColumnStyle('przeznaczenie')}>
+                        Przeznaczenie
+                        <ResizeHandle columnKey="przeznaczenie" />
                       </th>
                       <th
-                        className="py-3 px-3 border-b text-right text-sm font-semibold text-gray-600 cursor-pointer hover:bg-gray-100"
+                        className="py-3 px-3 border-b text-right text-sm font-semibold text-gray-600 cursor-pointer hover:bg-gray-100 relative"
+                        onClick={() => handleSort('IloscSprzedana')}
+                        style={getColumnStyle('ilosc')}
+                      >
+                        Ilość <SortIcon columnKey="IloscSprzedana" />
+                        <ResizeHandle columnKey="ilosc" />
+                      </th>
+                      <th
+                        className="py-3 px-3 border-b text-right text-sm font-semibold text-gray-600 cursor-pointer hover:bg-gray-100 relative"
                         onClick={() => handleSort('WartoscBrutto')}
+                        style={getColumnStyle('wartosc')}
                       >
                         Wartość brutto <SortIcon columnKey="WartoscBrutto" />
+                        <ResizeHandle columnKey="wartosc" />
                       </th>
                     </tr>
                   </thead>

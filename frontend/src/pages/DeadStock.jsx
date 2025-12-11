@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react'
-import { AlertTriangle, XCircle, TrendingDown, Calendar, DollarSign, Package, Search, Filter, Warehouse, RefreshCw, Save, BookMarked, Trash2, Check, HelpCircle, X } from 'lucide-react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
+import { AlertTriangle, XCircle, TrendingDown, Calendar, DollarSign, Package, Search, Filter, Warehouse, RefreshCw, Save, BookMarked, Trash2, Check, HelpCircle, X, RotateCcw } from 'lucide-react'
 import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import { API_BASE_URL } from '../config/api'
 import MultiSelect from '../components/MultiSelect'
 import Toast from '../components/Toast'
+import { useResizableColumns } from '../hooks/useResizableColumns'
 
 // Cache helpers
 const CACHE_KEY = 'deadStock_cache';
@@ -48,10 +49,18 @@ function DeadStock() {
   const [sortBy, setSortBy] = useState('days_no_movement');
   const [selectedMagazyny, setSelectedMagazyny] = useState(['1', '2', '7']);
 
-  // Listy unikalnych wartości dla filtrów
+  // Listy unikalnych wartości dla filtrów (inicjalne z danych)
   const [availableMarki, setAvailableMarki] = useState([]);
   const [availableRodzaje, setAvailableRodzaje] = useState([]);
   const [availableGrupy, setAvailableGrupy] = useState([]);
+
+  // Dynamiczne opcje filtrów (zawężone na podstawie wybranych wartości)
+  const [dynamicOptions, setDynamicOptions] = useState({
+    marka: [],
+    rodzaj: [],
+    grupa: []
+  });
+  const [loadingDynamicOptions, setLoadingDynamicOptions] = useState(false);
 
   // Zapisane filtry
   const [savedFilters, setSavedFilters] = useState([]);
@@ -63,6 +72,20 @@ function DeadStock() {
 
   // Stan dla okna pomocy
   const [showHelp, setShowHelp] = useState(false);
+
+  // Resizable columns
+  const { getColumnStyle, ResizeHandle, resetWidths } = useResizableColumns({
+    status: 100,
+    produkt: 250,
+    kategoria: 120,
+    wartosc: 120,
+    stan: 80,
+    dniRuchu: 100,
+    sprz90: 80,
+    dniZapasu: 100,
+    ostatniaSprz: 100,
+    rekomendacja: 200
+  }, 'deadStock_columns', 50);
 
   // Mapowanie magazynów
   const magazyny = {
@@ -139,7 +162,7 @@ function DeadStock() {
       setDeadStockData(data);
       saveToCache(data);
 
-      // Wyciągnij unikalne marki, rodzaje i grupy z danych
+      // Wyciągnij unikalne marki, rodzaje i grupy z danych (jako inicjalne opcje)
       if (data.items && data.items.length > 0) {
         const marki = [...new Set(data.items.map(item => item.Marka).filter(m => m && m.trim() !== ''))].sort();
         const rodzaje = [...new Set(data.items.map(item => item.Rodzaj).filter(r => r && r.trim() !== '' && r !== 'Nieznana'))].sort();
@@ -147,6 +170,12 @@ function DeadStock() {
         setAvailableMarki(marki);
         setAvailableRodzaje(rodzaje);
         setAvailableGrupy(grupy);
+        // Ustaw też jako początkowe dynamiczne opcje
+        setDynamicOptions({
+          marka: marki,
+          rodzaj: rodzaje,
+          grupa: grupy
+        });
       }
     } catch (error) {
       setError(error);
@@ -155,6 +184,55 @@ function DeadStock() {
       setLoading(false);
     }
   };
+
+  // Pobierz dynamiczne opcje filtrów na podstawie wybranych wartości
+  const fetchDynamicOptions = useCallback(async () => {
+    try {
+      setLoadingDynamicOptions(true);
+      const response = await fetch(`${API_URL}/api/products/filter-options-dynamic`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          marka: tempMarki,
+          rodzaj: tempRodzaje,
+          grupa: tempGrupy
+        })
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        if (result.success && result.data) {
+          setDynamicOptions({
+            marka: result.data.marka || availableMarki,
+            rodzaj: result.data.rodzaj || availableRodzaje,
+            grupa: result.data.grupa || availableGrupy
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Błąd pobierania dynamicznych opcji:', error);
+    } finally {
+      setLoadingDynamicOptions(false);
+    }
+  }, [tempMarki, tempRodzaje, tempGrupy, availableMarki, availableRodzaje, availableGrupy, API_URL]);
+
+  // Debounce - pobierz dynamiczne opcje po 300ms od ostatniej zmiany
+  useEffect(() => {
+    const hasAnyFilter = tempMarki.length > 0 || tempRodzaje.length > 0 || tempGrupy.length > 0;
+    if (hasAnyFilter) {
+      const timer = setTimeout(() => {
+        fetchDynamicOptions();
+      }, 300);
+      return () => clearTimeout(timer);
+    } else {
+      // Jeśli nie ma filtrów, pokaż wszystkie opcje
+      setDynamicOptions({
+        marka: availableMarki,
+        rodzaj: availableRodzaje,
+        grupa: availableGrupy
+      });
+    }
+  }, [tempMarki, tempRodzaje, tempGrupy, availableMarki, availableRodzaje, availableGrupy]);
 
   // Funkcja formatowania liczb z separatorami tysięcznymi
   const formatNumber = (num, decimals = 2) => {
@@ -501,26 +579,37 @@ function DeadStock() {
             </div>
           </div>
 
-          {/* Filtry Marki, Rodzaju i Grup - Multi-Select */}
+          {/* Filtry Marki, Rodzaju i Grup - Multi-Select z dynamicznym zawężaniem */}
           <div className="border-t pt-4">
+            <div className="flex items-center gap-2 mb-3">
+              <Filter className="w-4 h-4 text-blue-600" />
+              <span className="text-sm font-medium text-gray-700">Filtry produktów</span>
+              {loadingDynamicOptions && (
+                <span className="ml-2 text-xs text-blue-600 flex items-center gap-1">
+                  <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-blue-600"></div>
+                  Aktualizuję opcje...
+                </span>
+              )}
+              <span className="text-xs text-blue-600 ml-auto">Listy zawężają się automatycznie</span>
+            </div>
             <div className="grid grid-cols-3 gap-4 mb-3">
               <MultiSelect
                 label="Marki"
-                options={availableMarki}
+                options={dynamicOptions.marka}
                 selected={tempMarki}
                 onChange={setTempMarki}
                 placeholder="Wszystkie marki"
               />
               <MultiSelect
                 label="Rodzaje"
-                options={availableRodzaje}
+                options={dynamicOptions.rodzaj}
                 selected={tempRodzaje}
                 onChange={setTempRodzaje}
                 placeholder="Wszystkie rodzaje"
               />
               <MultiSelect
                 label="Grupy produktowe"
-                options={availableGrupy}
+                options={dynamicOptions.grupa}
                 selected={tempGrupy}
                 onChange={setTempGrupy}
                 placeholder="Wszystkie grupy"
@@ -770,38 +859,58 @@ function DeadStock() {
         </div>
 
         <div className="overflow-x-auto">
-          <table className="min-w-full">
+          <div className="flex justify-end mb-2">
+            <button
+              onClick={resetWidths}
+              className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1"
+              title="Resetuj szerokości kolumn"
+            >
+              <RotateCcw className="w-3 h-3" />
+              Reset kolumn
+            </button>
+          </div>
+          <table className="min-w-full table-fixed">
             <thead className="bg-gray-100">
               <tr>
-                <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider sticky left-0 bg-gray-100">
+                <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider sticky left-0 bg-gray-100 relative" style={getColumnStyle('status')}>
                   Status
+                  <ResizeHandle columnKey="status" />
                 </th>
-                <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">
+                <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider relative" style={getColumnStyle('produkt')}>
                   Produkt
+                  <ResizeHandle columnKey="produkt" />
                 </th>
-                <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">
+                <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider relative" style={getColumnStyle('kategoria')}>
                   Kategoria
+                  <ResizeHandle columnKey="kategoria" />
                 </th>
-                <th className="px-3 py-3 text-right text-xs font-bold text-gray-700 uppercase tracking-wider">
+                <th className="px-3 py-3 text-right text-xs font-bold text-gray-700 uppercase tracking-wider relative" style={getColumnStyle('wartosc')}>
                   Wartość zamrożona
+                  <ResizeHandle columnKey="wartosc" />
                 </th>
-                <th className="px-3 py-3 text-right text-xs font-bold text-gray-700 uppercase tracking-wider">
+                <th className="px-3 py-3 text-right text-xs font-bold text-gray-700 uppercase tracking-wider relative" style={getColumnStyle('stan')}>
                   Stan
+                  <ResizeHandle columnKey="stan" />
                 </th>
-                <th className="px-3 py-3 text-right text-xs font-bold text-gray-700 uppercase tracking-wider">
+                <th className="px-3 py-3 text-right text-xs font-bold text-gray-700 uppercase tracking-wider relative" style={getColumnStyle('dniRuchu')}>
                   Dni bez ruchu
+                  <ResizeHandle columnKey="dniRuchu" />
                 </th>
-                <th className="px-3 py-3 text-right text-xs font-bold text-gray-700 uppercase tracking-wider">
+                <th className="px-3 py-3 text-right text-xs font-bold text-gray-700 uppercase tracking-wider relative" style={getColumnStyle('sprz90')}>
                   Sprz. 90d
+                  <ResizeHandle columnKey="sprz90" />
                 </th>
-                <th className="px-3 py-3 text-right text-xs font-bold text-gray-700 uppercase tracking-wider">
+                <th className="px-3 py-3 text-right text-xs font-bold text-gray-700 uppercase tracking-wider relative" style={getColumnStyle('dniZapasu')}>
                   Dni zapasu
+                  <ResizeHandle columnKey="dniZapasu" />
                 </th>
-                <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">
+                <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider relative" style={getColumnStyle('ostatniaSprz')}>
                   Ostatnia sprz.
+                  <ResizeHandle columnKey="ostatniaSprz" />
                 </th>
-                <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider min-w-[200px]">
+                <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider relative" style={getColumnStyle('rekomendacja')}>
                   Rekomendacja
+                  <ResizeHandle columnKey="rekomendacja" />
                 </th>
               </tr>
             </thead>

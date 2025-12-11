@@ -52,6 +52,11 @@ const menuStructure = [
         label: 'Stany Magazynowe'
       },
       {
+        path: '/minimal-stocks',
+        icon: ClipboardList,
+        label: 'Stany Minimalne'
+      },
+      {
         path: '/dead-stock',
         icon: AlertTriangle,
         label: 'Martwe Stany'

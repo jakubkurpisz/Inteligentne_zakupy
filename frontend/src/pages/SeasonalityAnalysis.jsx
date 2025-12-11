@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react'
-import { Calendar, TrendingUp, TrendingDown, Minus, RefreshCw, Filter, ChevronLeft, ChevronRight, Search, ChevronDown, ChevronUp, Package, EyeOff, Eye, ArrowUpDown, ArrowUp, ArrowDown, Settings, Info, HelpCircle, X } from 'lucide-react'
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
+import { Calendar, TrendingUp, TrendingDown, Minus, RefreshCw, Filter, ChevronLeft, ChevronRight, Search, ChevronDown, ChevronUp, Package, EyeOff, Eye, ArrowUpDown, ArrowUp, ArrowDown, Settings, Info, HelpCircle, X, RotateCcw } from 'lucide-react'
 import { ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell } from 'recharts'
 import { API_BASE_URL } from '../config/api'
+import { useResizableColumns } from '../hooks/useResizableColumns'
 
 // Cache helpers
 const CACHE_KEY = 'seasonality_cache';
@@ -30,6 +31,10 @@ function SeasonalityAnalysis() {
   // Filtry
   const [selectedRodzaj, setSelectedRodzaj] = useState('');
   const [selectedMarka, setSelectedMarka] = useState('');
+
+  // Dynamiczne opcje filtrów (zawężone na podstawie wybranych wartości)
+  const [dynamicOptions, setDynamicOptions] = useState({ rodzaj: [], marka: [] });
+  const [loadingDynamicOptions, setLoadingDynamicOptions] = useState(false);
   const [searchSymbol, setSearchSymbol] = useState('');
   const [selectedMagazyny, setSelectedMagazyny] = useState(['1', '7', '9']);
 
@@ -66,6 +71,27 @@ function SeasonalityAnalysis() {
   const [stockWeeks, setStockWeeks] = useState(1); // Zapas na ile tygodni
   const [deliveryWeeks, setDeliveryWeeks] = useState(1); // Czas dostawy w tygodniach
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
+
+  // Resizable columns dla tabeli sezonowości
+  const { getColumnStyle: getSeasonColStyle, ResizeHandle: SeasonResizeHandle, resetWidths: resetSeasonWidths } = useResizableColumns({
+    symbol: 90,
+    nazwa: 130,
+    suma: 45,
+    trend: 60,
+    szcz: 40
+  }, 'seasonality_columns', 40);
+
+  // Resizable columns dla tabeli stanów minimalnych
+  const { getColumnStyle: getMinStockColStyle, ResizeHandle: MinStockResizeHandle, resetWidths: resetMinStockWidths } = useResizableColumns({
+    ignoruj: 40,
+    symbol: 110,
+    nazwa: 180,
+    marka: 80,
+    rodzaj: 100,
+    stan: 60,
+    minStan: 60,
+    doZam: 80
+  }, 'seasonality_minstock_columns', 40);
 
   // Stan dla okna pomocy
   const [showHelp, setShowHelp] = useState(false);
@@ -216,6 +242,12 @@ function SeasonalityAnalysis() {
         setTotalProducts(newTotalProducts);
         setWeeksList(newWeeksList);
 
+        // Ustaw początkowe dynamiczne opcje
+        setDynamicOptions({
+          rodzaj: newFilters.rodzaje || [],
+          marka: newFilters.marki || []
+        });
+
         saveAllToCache({
           data: newData,
           filters: newFilters,
@@ -231,6 +263,52 @@ function SeasonalityAnalysis() {
       setLoading(false);
     }
   };
+
+  // Pobierz dynamiczne opcje filtrów na podstawie wybranych wartości
+  const fetchDynamicOptions = useCallback(async () => {
+    try {
+      setLoadingDynamicOptions(true);
+      const response = await fetch(`${API_URL}/api/products/filter-options-dynamic`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rodzaj: selectedRodzaj ? [selectedRodzaj] : [],
+          marka: selectedMarka ? [selectedMarka] : []
+        })
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        if (result.success && result.data) {
+          setDynamicOptions({
+            rodzaj: result.data.rodzaj || filters.rodzaje,
+            marka: result.data.marka || filters.marki
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Błąd pobierania dynamicznych opcji:', error);
+    } finally {
+      setLoadingDynamicOptions(false);
+    }
+  }, [selectedRodzaj, selectedMarka, filters, API_URL]);
+
+  // Debounce - pobierz dynamiczne opcje po 300ms od ostatniej zmiany
+  useEffect(() => {
+    const hasAnyFilter = selectedRodzaj || selectedMarka;
+    if (hasAnyFilter) {
+      const timer = setTimeout(() => {
+        fetchDynamicOptions();
+      }, 300);
+      return () => clearTimeout(timer);
+    } else {
+      // Jeśli nie ma filtrów, pokaż wszystkie opcje
+      setDynamicOptions({
+        rodzaj: filters.rodzaje || [],
+        marka: filters.marki || []
+      });
+    }
+  }, [selectedRodzaj, selectedMarka, filters]);
 
   // Pobierz dane gdy zmienią się magazyny (ale nie przy pierwszym montowaniu)
   useEffect(() => {
@@ -530,7 +608,18 @@ function SeasonalityAnalysis() {
             </div>
           </div>
 
-          {/* Filtry produktów */}
+          {/* Filtry produktów z dynamicznym zawężaniem */}
+          <div className="mb-2 flex items-center gap-2">
+            <Filter className="w-4 h-4 text-blue-600" />
+            <span className="text-sm font-medium text-gray-700">Filtry produktów</span>
+            {loadingDynamicOptions && (
+              <span className="ml-2 text-xs text-blue-600 flex items-center gap-1">
+                <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-blue-600"></div>
+                Aktualizuję opcje...
+              </span>
+            )}
+            <span className="text-xs text-blue-600 ml-auto">Listy zawężają się automatycznie</span>
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Symbol</label>
@@ -554,7 +643,7 @@ function SeasonalityAnalysis() {
                 className="w-full p-2 border border-gray-300 rounded-lg text-sm"
               >
                 <option value="">Wszystkie rodzaje</option>
-                {filters.rodzaje.map(r => (
+                {dynamicOptions.rodzaj.map(r => (
                   <option key={r} value={r}>{r}</option>
                 ))}
               </select>
@@ -568,7 +657,7 @@ function SeasonalityAnalysis() {
                 className="w-full p-2 border border-gray-300 rounded-lg text-sm"
               >
                 <option value="">Wszystkie marki</option>
-                {filters.marki.map(m => (
+                {dynamicOptions.marka.map(m => (
                   <option key={m} value={m}>{m}</option>
                 ))}
               </select>
@@ -696,14 +785,39 @@ function SeasonalityAnalysis() {
               </div>
             ) : (
               <div className="overflow-x-auto">
+                <div className="flex justify-end mb-2">
+                  <button
+                    onClick={resetSeasonWidths}
+                    className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1"
+                    title="Resetuj szerokości kolumn"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    Reset kolumn
+                  </button>
+                </div>
                 <table className="w-full text-sm table-fixed">
                   <thead className="bg-gray-50">
                     <tr>
-                      <th className="py-2 px-1 text-left font-semibold text-gray-600 w-[90px]">Symbol</th>
-                      <th className="py-2 px-1 text-left font-semibold text-gray-600 w-[130px]">Nazwa</th>
-                      <th className="py-2 px-1 text-right font-semibold text-gray-600 w-[45px]">Suma</th>
-                      <th className="py-2 px-1 text-center font-semibold text-gray-600 w-[60px]">Trend</th>
-                      <th className="py-2 px-1 text-center font-semibold text-gray-600 w-[40px]">Szcz.</th>
+                      <th className="py-2 px-1 text-left font-semibold text-gray-600 relative" style={getSeasonColStyle('symbol')}>
+                        Symbol
+                        <SeasonResizeHandle columnKey="symbol" />
+                      </th>
+                      <th className="py-2 px-1 text-left font-semibold text-gray-600 relative" style={getSeasonColStyle('nazwa')}>
+                        Nazwa
+                        <SeasonResizeHandle columnKey="nazwa" />
+                      </th>
+                      <th className="py-2 px-1 text-right font-semibold text-gray-600 relative" style={getSeasonColStyle('suma')}>
+                        Suma
+                        <SeasonResizeHandle columnKey="suma" />
+                      </th>
+                      <th className="py-2 px-1 text-center font-semibold text-gray-600 relative" style={getSeasonColStyle('trend')}>
+                        Trend
+                        <SeasonResizeHandle columnKey="trend" />
+                      </th>
+                      <th className="py-2 px-1 text-center font-semibold text-gray-600 relative" style={getSeasonColStyle('szcz')}>
+                        Szcz.
+                        <SeasonResizeHandle columnKey="szcz" />
+                      </th>
                       {weekHeaders.map(({ key, label, year, dateRange }) => (
                         <th key={key} className="py-2 px-1 text-center font-semibold text-gray-600 w-[55px] min-w-[55px]">
                           <div className="text-[11px]">{label}</div>
@@ -954,74 +1068,99 @@ function SeasonalityAnalysis() {
             </div>
 
             <div className="overflow-x-auto">
-              <table className="min-w-full text-sm">
+              <div className="flex justify-end mb-2">
+                <button
+                  onClick={resetMinStockWidths}
+                  className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1"
+                  title="Resetuj szerokości kolumn"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  Reset kolumn
+                </button>
+              </div>
+              <table className="min-w-full text-sm table-fixed">
                 <thead className="bg-gray-50">
                   <tr>
-                    <th className="py-3 px-2 text-center font-semibold text-gray-600 w-10" title="Nie zamawiaj więcej">
+                    <th className="py-3 px-2 text-center font-semibold text-gray-600 relative" style={getMinStockColStyle('ignoruj')} title="Nie zamawiaj więcej">
                       <EyeOff className="w-4 h-4 mx-auto text-gray-400" />
+                      <MinStockResizeHandle columnKey="ignoruj" />
                     </th>
                     <th
-                      className="py-3 px-3 text-left font-semibold text-gray-600 cursor-pointer hover:bg-gray-100"
+                      className="py-3 px-3 text-left font-semibold text-gray-600 cursor-pointer hover:bg-gray-100 relative"
                       onClick={() => handleSort('symbol')}
+                      style={getMinStockColStyle('symbol')}
                     >
                       <div className="flex items-center">
                         Symbol
                         <SortIcon column="symbol" />
                       </div>
+                      <MinStockResizeHandle columnKey="symbol" />
                     </th>
                     <th
-                      className="py-3 px-3 text-left font-semibold text-gray-600 cursor-pointer hover:bg-gray-100"
+                      className="py-3 px-3 text-left font-semibold text-gray-600 cursor-pointer hover:bg-gray-100 relative"
                       onClick={() => handleSort('nazwa')}
+                      style={getMinStockColStyle('nazwa')}
                     >
                       <div className="flex items-center">
                         Nazwa
                         <SortIcon column="nazwa" />
                       </div>
+                      <MinStockResizeHandle columnKey="nazwa" />
                     </th>
                     <th
-                      className="py-3 px-3 text-left font-semibold text-gray-600 cursor-pointer hover:bg-gray-100"
+                      className="py-3 px-3 text-left font-semibold text-gray-600 cursor-pointer hover:bg-gray-100 relative"
                       onClick={() => handleSort('rodzaj')}
+                      style={getMinStockColStyle('rodzaj')}
                     >
                       <div className="flex items-center">
                         Rodzaj
                         <SortIcon column="rodzaj" />
                       </div>
+                      <MinStockResizeHandle columnKey="rodzaj" />
                     </th>
                     <th
-                      className="py-3 px-3 text-right font-semibold text-gray-600 cursor-pointer hover:bg-gray-100"
+                      className="py-3 px-3 text-right font-semibold text-gray-600 cursor-pointer hover:bg-gray-100 relative"
                       onClick={() => handleSort('avgWeekly')}
+                      style={getMinStockColStyle('stan')}
                     >
                       <div className="flex items-center justify-end">
                         Śr. tyg.
                         <SortIcon column="avgWeekly" />
                       </div>
+                      <MinStockResizeHandle columnKey="stan" />
                     </th>
                     <th
-                      className="py-3 px-3 text-right font-semibold text-gray-600 bg-blue-50 cursor-pointer hover:bg-blue-100"
+                      className="py-3 px-3 text-right font-semibold text-gray-600 bg-blue-50 cursor-pointer hover:bg-blue-100 relative"
                       onClick={() => handleSort('currentStock')}
+                      style={getMinStockColStyle('minStan')}
                     >
                       <div className="flex items-center justify-end">
                         Stan aktualny
                         <SortIcon column="currentStock" />
                       </div>
+                      <MinStockResizeHandle columnKey="minStan" />
                     </th>
                     <th
-                      className="py-3 px-3 text-right font-semibold text-gray-600 bg-green-50 cursor-pointer hover:bg-green-100"
+                      className="py-3 px-3 text-right font-semibold text-gray-600 bg-green-50 cursor-pointer hover:bg-green-100 relative"
                       onClick={() => handleSort('minStock')}
+                      style={getMinStockColStyle('minStan')}
                     >
                       <div className="flex items-center justify-end">
                         Stan MIN
                         <SortIcon column="minStock" />
                       </div>
+                      <MinStockResizeHandle columnKey="minStan" />
                     </th>
                     <th
-                      className="py-3 px-3 text-right font-semibold text-gray-600 bg-orange-50 cursor-pointer hover:bg-orange-100"
+                      className="py-3 px-3 text-right font-semibold text-gray-600 bg-orange-50 cursor-pointer hover:bg-orange-100 relative"
                       onClick={() => handleSort('toOrder')}
+                      style={getMinStockColStyle('doZam')}
                     >
                       <div className="flex items-center justify-end">
                         Do uzupełnienia
                         <SortIcon column="toOrder" />
                       </div>
+                      <MinStockResizeHandle columnKey="doZam" />
                     </th>
                   </tr>
                 </thead>

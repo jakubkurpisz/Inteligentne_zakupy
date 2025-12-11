@@ -3259,10 +3259,12 @@ async def get_warehouse_stocks(mag_ids: Optional[str] = "1,7,9"):
             st.st_MagId AS MagId,
             st.st_Stan AS Stan,
             tc.tc_CenaNetto1 AS DetalicznaNetto,
-            tc.tc_CenaBrutto1 AS DetalicznaBrutto
+            tc.tc_CenaBrutto1 AS DetalicznaBrutto,
+            vat.vat_Stawka AS StawkaVAT
         FROM tw_Stan st
         INNER JOIN tw__Towar tw ON st.st_TowId = tw.tw_Id
         LEFT JOIN tw_Cena tc ON st.st_TowId = tc.tc_IdTowar
+        LEFT JOIN sl_StawkaVAT vat ON tw.tw_IdVatSp = vat.vat_Id
         WHERE st.st_Stan > 0
             AND st.st_MagId IN ({mag_placeholders})
         ORDER BY tw.tw_Symbol, st.st_MagId
@@ -3295,6 +3297,7 @@ async def get_warehouse_stocks(mag_ids: Optional[str] = "1,7,9"):
                     'Rodzaj': row[4],
                     'DetalicznaNetto': float(row[7]) if row[7] else 0,
                     'DetalicznaBrutto': float(row[8]) if row[8] else 0,
+                    'StawkaVAT': float(row[9]) if row[9] else None,
                     'CenaZakupuNetto': purchase_prices.get(symbol, 0),
                     'StanMag1': 0,  # GLS
                     'StanMag2': 0,  # GLS DEPOZYT
@@ -3795,6 +3798,781 @@ def init_ignored_products_table():
 
 # Inicjalizuj tabelę przy starcie
 init_ignored_products_table()
+
+
+# =============================================================================
+# PROPONOWANE STANY MINIMALNE - dla konkretnych symboli
+# =============================================================================
+
+@app.post("/api/suggested-min-stocks")
+async def get_suggested_min_stocks(data: dict):
+    """
+    Pobiera proponowane stany minimalne dla listy symboli produktów.
+
+    Parametry w body:
+    - symbols: lista symboli produktów
+    - stock_weeks: liczba tygodni zapasu (domyślnie 1)
+    - delivery_weeks: czas dostawy w tygodniach (domyślnie 1)
+
+    Zwraca dla każdego symbolu:
+    - srednia_tygodniowa: średnia tygodniowa sprzedaż
+    - proponowany_min: obliczony stan minimalny
+    - indeks_sezonowy: aktualny indeks sezonowości
+    """
+    from datetime import datetime, timedelta
+
+    symbols = data.get('symbols', [])
+    stock_weeks = data.get('stock_weeks', 1)
+    delivery_weeks = data.get('delivery_weeks', 1)
+
+    if not symbols:
+        return {"success": True, "data": {}}
+
+    try:
+        # Połączenie z SQL Server
+        server = os.getenv('SQL_SERVER', r'10.101.101.5\INSERTGT')
+        database = os.getenv('SQL_DATABASE', 'Sporting_Leszno')
+        username = os.getenv('SQL_USERNAME', 'zestawienia2')
+        password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
+
+        sql_connection = pyodbc.connect(
+            'DRIVER={ODBC Driver 18 for SQL Server};'
+            f'SERVER={server};'
+            f'DATABASE={database};'
+            f'UID={username};'
+            f'PWD={password};'
+            'TrustServerCertificate=yes;'
+            'Connection Timeout=30;'
+        )
+        sql_cursor = sql_connection.cursor()
+
+        # Daty - 52 tygodnie wstecz
+        end_date = datetime.now()
+        start_date = end_date - timedelta(weeks=52)
+
+        # Przygotuj placeholder dla symboli
+        symbol_placeholders = ','.join(['?' for _ in symbols])
+
+        # Zapytanie pobierające sprzedaż tygodniową
+        query = f"""
+        SELECT
+            tw.tw_Symbol AS Symbol,
+            DATEPART(ISO_WEEK, dok_DataWyst) AS NumerTygodnia,
+            YEAR(DATEADD(day, 26 - DATEPART(iso_week, dok_DataWyst), dok_DataWyst)) AS RokISO,
+            SUM(CASE WHEN dok_Typ IN (14, 6) THEN -ob_IloscMag ELSE ob_IloscMag END) AS IloscSprzedana
+        FROM vwZstSprzWgKhnt
+        INNER JOIN tw__Towar tw ON ob_TowId = tw.tw_Id
+        WHERE CAST(dok_DataWyst AS DATE) >= ?
+            AND CAST(dok_DataWyst AS DATE) <= ?
+            AND dok_MagId IN (1, 7, 9)
+            AND dok_Podtyp <> 1
+            AND dok_Status <> 2
+            AND tw.tw_Symbol IN ({symbol_placeholders})
+        GROUP BY
+            tw.tw_Symbol,
+            DATEPART(ISO_WEEK, dok_DataWyst),
+            YEAR(DATEADD(day, 26 - DATEPART(iso_week, dok_DataWyst), dok_DataWyst))
+        ORDER BY tw.tw_Symbol, RokISO, NumerTygodnia
+        """
+
+        params = [start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')] + symbols
+        sql_cursor.execute(query, params)
+        rows = sql_cursor.fetchall()
+        sql_cursor.close()
+        sql_connection.close()
+
+        # Grupuj dane per symbol
+        sales_by_symbol = {}
+        for row in rows:
+            symbol = row[0]
+            week_num = row[1]
+            year = row[2]
+            qty = float(row[3] or 0)
+
+            if symbol not in sales_by_symbol:
+                sales_by_symbol[symbol] = {
+                    'weekly_sales': [],
+                    'recent_weeks': {}
+                }
+
+            sales_by_symbol[symbol]['weekly_sales'].append(qty)
+
+            # Zachowaj sprzedaż z ostatnich tygodni (klucz: rok-tydzień)
+            week_key = f"{year}-{week_num:02d}"
+            sales_by_symbol[symbol]['recent_weeks'][week_key] = qty
+
+        # Oblicz proponowany stan minimalny dla każdego symbolu
+        result = {}
+        current_week = end_date.isocalendar()[1]
+        current_year = end_date.year
+        total_weeks = stock_weeks + delivery_weeks
+
+        for symbol in symbols:
+            data_for_symbol = sales_by_symbol.get(symbol)
+
+            if not data_for_symbol or not data_for_symbol['weekly_sales']:
+                result[symbol] = {
+                    'srednia_tygodniowa': 0,
+                    'proponowany_min': 0,
+                    'indeks_sezonowy': 1.0
+                }
+                continue
+
+            weekly_sales = data_for_symbol['weekly_sales']
+            avg_weekly = sum(weekly_sales) / len(weekly_sales) if weekly_sales else 0
+
+            # Oblicz maksymalny indeks z ostatnich N tygodni
+            max_index = 1.0
+            if avg_weekly > 0:
+                recent_weeks_data = data_for_symbol['recent_weeks']
+                # Weź ostatnie total_weeks tygodni
+                for i in range(total_weeks):
+                    week_offset = current_week - i
+                    year_offset = current_year
+                    if week_offset <= 0:
+                        week_offset += 52
+                        year_offset -= 1
+                    week_key = f"{year_offset}-{week_offset:02d}"
+                    week_sales = recent_weeks_data.get(week_key, 0)
+                    if week_sales > 0:
+                        week_index = week_sales / avg_weekly
+                        if week_index > max_index:
+                            max_index = week_index
+
+            # Stan minimalny = średnia tygodniowa × indeks × (zapas + dostawa)
+            suggested_min = math.ceil(avg_weekly * max_index * total_weeks)
+
+            result[symbol] = {
+                'srednia_tygodniowa': round(avg_weekly, 2),
+                'proponowany_min': suggested_min,
+                'indeks_sezonowy': round(max_index, 2)
+            }
+
+        return {"success": True, "data": result}
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e), "data": {}}
+
+
+# =============================================================================
+# STANY MINIMALNE - Grupy produktów z dynamicznym filtrowaniem
+# =============================================================================
+
+def init_minimal_stocks_table():
+    """Inicjalizuje tabelę grup stanów minimalnych"""
+    try:
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        cursor = conn.cursor()
+
+        # Tabela główna grup
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS minimal_stock_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                min_stock INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'active',
+                filter_rozmiar TEXT,
+                filter_marka TEXT,
+                filter_model TEXT,
+                filter_plec TEXT,
+                filter_rodzaj TEXT,
+                filter_uwagi TEXT,
+                filter_opis TEXT,
+                filter_kolor TEXT,
+                filter_sezon TEXT,
+                filter_nazwa TEXT,
+                filter_przeznaczenie TEXT,
+                exclude_rozmiar TEXT,
+                exclude_marka TEXT,
+                exclude_model TEXT,
+                exclude_plec TEXT,
+                exclude_rodzaj TEXT,
+                exclude_uwagi TEXT,
+                exclude_opis TEXT,
+                exclude_kolor TEXT,
+                exclude_sezon TEXT,
+                exclude_nazwa TEXT,
+                exclude_przeznaczenie TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        # Dodaj kolumny jeśli nie istnieją (dla istniejących baz)
+        new_columns = [
+            'filter_przeznaczenie', 'exclude_rozmiar', 'exclude_marka', 'exclude_model',
+            'exclude_plec', 'exclude_rodzaj', 'exclude_uwagi', 'exclude_opis',
+            'exclude_kolor', 'exclude_sezon', 'exclude_nazwa', 'exclude_przeznaczenie'
+        ]
+        for col in new_columns:
+            try:
+                cursor.execute(f"ALTER TABLE minimal_stock_groups ADD COLUMN {col} TEXT")
+            except:
+                pass
+        conn.commit()
+        conn.close()
+        print("[DB] Tabela minimal_stock_groups gotowa")
+    except Exception as e:
+        print(f"[DB] Błąd tworzenia tabeli minimal_stock_groups: {e}")
+
+
+# Inicjalizuj tabelę przy starcie
+init_minimal_stocks_table()
+
+
+def get_products_for_group(filters: dict) -> list:
+    """
+    Pobiera produkty pasujące do filtrów grupy.
+    Filtruje po: Rozmiar, Marka, Model, Plec, Rodzaj, Uwagi, Opis, Kolor, Sezon, Nazwa, Przeznaczenie
+    Obsługuje też wykluczenia (exclude_*)
+    """
+    import json
+    try:
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # Budowanie zapytania SQL z JOIN do products
+        conditions = []
+        exclusions = []
+        params = []
+
+        # Mapowanie filtrów na kolumny
+        column_mapping = {
+            'rozmiar': 'p.Rozmiar',
+            'marka': 'p.Marka',
+            'model': 'p.Model',
+            'plec': 'p.Plec',
+            'rodzaj': 'p.Rodzaj',
+            'uwagi': 'p.Uwagi',
+            'opis': 'p.Opis',
+            'kolor': 'p.Kolor',
+            'sezon': 'p.Sezon',
+            'nazwa': 'p.Nazwa',
+            'przeznaczenie': 'p.Przeznaczenie'
+        }
+
+        # Helper do parsowania wartości filtra (może być string, JSON array, lub lista)
+        def parse_filter_value(value):
+            if not value:
+                return []
+            if isinstance(value, list):
+                return [v for v in value if v]
+            if isinstance(value, str):
+                value = value.strip()
+                if not value:
+                    return []
+                try:
+                    if value.startswith('['):
+                        parsed = json.loads(value)
+                        return [v for v in parsed if v] if isinstance(parsed, list) else [value]
+                except:
+                    pass
+                return [v.strip() for v in value.split(',') if v.strip()]
+            return []
+
+        # Przetwarzanie filtrów (warunki włączające)
+        for field, column in column_mapping.items():
+            filter_key = f'filter_{field}'
+            values = parse_filter_value(filters.get(filter_key))
+
+            if values:
+                like_conditions = []
+                for v in values:
+                    like_conditions.append(f"{column} LIKE ?")
+                    params.append(f"%{v}%")
+                conditions.append(f"({' OR '.join(like_conditions)})")
+
+        # Przetwarzanie wykluczeń (warunki wykluczające)
+        for field, column in column_mapping.items():
+            exclude_key = f'exclude_{field}'
+            values = parse_filter_value(filters.get(exclude_key))
+
+            if values:
+                not_like_conditions = []
+                for v in values:
+                    not_like_conditions.append(f"({column} IS NULL OR {column} NOT LIKE ?)")
+                    params.append(f"%{v}%")
+                exclusions.append(f"({' AND '.join(not_like_conditions)})")
+
+        # Bazowe zapytanie - tylko produkty ze stanem > 0
+        query = """
+            SELECT p.Symbol, p.Nazwa, p.Stan, p.Marka, p.Rodzaj, p.Rozmiar,
+                   p.Kolor, p.Model, p.Plec, p.Sezon, p.DetalicznaNetto, p.DetalicznaBrutto,
+                   p.Przeznaczenie, p.Uwagi
+            FROM products p
+            WHERE p.Stan > 0
+        """
+
+        if conditions:
+            query += " AND " + " AND ".join(conditions)
+
+        if exclusions:
+            query += " AND " + " AND ".join(exclusions)
+
+        query += " ORDER BY p.Nazwa"
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        conn.close()
+
+        return [dict(row) for row in rows]
+    except Exception as e:
+        print(f"[MinStock] Błąd pobierania produktów: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+@app.get("/api/minimal-stocks")
+async def get_minimal_stock_groups():
+    """Pobiera wszystkie grupy stanów minimalnych z obliczonymi sumami"""
+    try:
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT * FROM minimal_stock_groups
+            ORDER BY created_at DESC
+        """)
+        groups = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+
+        # Dla każdej grupy oblicz sumę stanów
+        for group in groups:
+            filters = {k: v for k, v in group.items() if k.startswith('filter_') or k.startswith('exclude_')}
+            products = get_products_for_group(filters)
+            group['current_stock'] = sum(p.get('Stan', 0) for p in products)
+            group['products_count'] = len(products)
+            group['stock_difference'] = group['current_stock'] - group['min_stock']
+
+        return {
+            "success": True,
+            "data": groups,
+            "total": len(groups)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd pobierania grup: {str(e)}")
+
+
+@app.get("/api/minimal-stocks/filter-options")
+async def get_filter_options():
+    """Pobiera dostępne wartości dla filtrów"""
+    try:
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        cursor = conn.cursor()
+
+        options = {}
+
+        # Pobierz unikalne wartości dla każdego pola
+        fields = ['Rozmiar', 'Marka', 'Model', 'Plec', 'Rodzaj', 'Kolor', 'Sezon', 'Przeznaczenie']
+
+        for field in fields:
+            cursor.execute(f"""
+                SELECT DISTINCT {field} FROM products
+                WHERE {field} IS NOT NULL AND {field} != '' AND Stan > 0
+                ORDER BY {field}
+            """)
+            options[field.lower()] = [row[0] for row in cursor.fetchall()]
+
+        conn.close()
+
+        return {
+            "success": True,
+            "data": options
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd pobierania opcji filtrów: {str(e)}")
+
+
+@app.post("/api/minimal-stocks/filter-options-dynamic")
+async def get_dynamic_filter_options(filters: dict):
+    """
+    Pobiera zawężone opcje filtrów na podstawie już wybranych wartości.
+    Np. jeśli wybrano Rodzaj=CZEPEK, to zwróci tylko marki które mają czepki.
+    """
+    import json
+
+    def parse_filter_value(value):
+        if not value:
+            return []
+        if isinstance(value, list):
+            return [v for v in value if v]
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return []
+            try:
+                if value.startswith('['):
+                    parsed = json.loads(value)
+                    return [v for v in parsed if v] if isinstance(parsed, list) else [value]
+            except:
+                pass
+            return [v.strip() for v in value.split(',') if v.strip()]
+        return []
+
+    try:
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        cursor = conn.cursor()
+
+        # Mapowanie filtrów na kolumny
+        column_mapping = {
+            'filter_rozmiar': 'Rozmiar',
+            'filter_marka': 'Marka',
+            'filter_model': 'Model',
+            'filter_plec': 'Plec',
+            'filter_rodzaj': 'Rodzaj',
+            'filter_kolor': 'Kolor',
+            'filter_sezon': 'Sezon',
+            'filter_przeznaczenie': 'Przeznaczenie'
+        }
+
+        # Budowanie warunków WHERE na podstawie wybranych filtrów
+        def build_conditions(exclude_field=None):
+            conditions = ["Stan > 0"]
+            params = []
+
+            for filter_key, column in column_mapping.items():
+                if filter_key == exclude_field:
+                    continue
+                values = parse_filter_value(filters.get(filter_key))
+                if values:
+                    like_parts = []
+                    for v in values:
+                        like_parts.append(f"{column} LIKE ?")
+                        params.append(f"%{v}%")
+                    conditions.append(f"({' OR '.join(like_parts)})")
+
+            return conditions, params
+
+        options = {}
+
+        # Dla każdego pola, pobierz dostępne opcje z uwzględnieniem innych filtrów
+        for filter_key, column in column_mapping.items():
+            conditions, params = build_conditions(exclude_field=filter_key)
+
+            query = f"""
+                SELECT DISTINCT {column} FROM products
+                WHERE {column} IS NOT NULL AND {column} != ''
+                AND {' AND '.join(conditions)}
+                ORDER BY {column}
+            """
+
+            cursor.execute(query, params)
+            options[column.lower()] = [row[0] for row in cursor.fetchall()]
+
+        conn.close()
+
+        return {
+            "success": True,
+            "data": options
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Błąd pobierania dynamicznych opcji filtrów: {str(e)}")
+
+
+@app.post("/api/products/filter-options-dynamic")
+async def get_products_dynamic_filter_options(filters: dict):
+    """
+    Uniwersalny endpoint do dynamicznego zawężania opcji filtrów dla produktów.
+    Używany przez widoki: DeadStock, SalesAnalysis, SeasonalityAnalysis.
+
+    Parametry w filters:
+    - rodzaj: string lub array
+    - marka: string lub array
+    - przeznaczenie: string lub array
+    - grupa: string lub array (grupa producenta)
+    - tylko_ze_stanem: bool (domyślnie False)
+    """
+    import json
+
+    def parse_filter_value(value):
+        if not value:
+            return []
+        if isinstance(value, list):
+            return [v for v in value if v]
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return []
+            try:
+                if value.startswith('['):
+                    parsed = json.loads(value)
+                    return [v for v in parsed if v] if isinstance(parsed, list) else [value]
+            except:
+                pass
+            return [v.strip() for v in value.split(',') if v.strip()]
+        return []
+
+    try:
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        cursor = conn.cursor()
+
+        # Mapowanie filtrów na kolumny
+        column_mapping = {
+            'rodzaj': 'Rodzaj',
+            'marka': 'Marka',
+            'przeznaczenie': 'Przeznaczenie',
+            'grupa': 'Grupa',
+            'kolor': 'Kolor',
+            'model': 'Model',
+            'plec': 'Plec',
+            'sezon': 'Sezon'
+        }
+
+        tylko_ze_stanem = filters.get('tylko_ze_stanem', False)
+
+        # Budowanie warunków WHERE na podstawie wybranych filtrów
+        def build_conditions(exclude_field=None):
+            conditions = []
+            params = []
+
+            if tylko_ze_stanem:
+                conditions.append("Stan > 0")
+
+            for filter_key, column in column_mapping.items():
+                if filter_key == exclude_field:
+                    continue
+                values = parse_filter_value(filters.get(filter_key))
+                if values:
+                    like_parts = []
+                    for v in values:
+                        like_parts.append(f"{column} LIKE ?")
+                        params.append(f"%{v}%")
+                    conditions.append(f"({' OR '.join(like_parts)})")
+
+            return conditions, params
+
+        options = {}
+
+        # Dla każdego pola, pobierz dostępne opcje z uwzględnieniem innych filtrów
+        for filter_key, column in column_mapping.items():
+            conditions, params = build_conditions(exclude_field=filter_key)
+
+            where_clause = ""
+            if conditions:
+                where_clause = f"AND {' AND '.join(conditions)}"
+
+            query = f"""
+                SELECT DISTINCT {column} FROM products
+                WHERE {column} IS NOT NULL AND {column} != ''
+                {where_clause}
+                ORDER BY {column}
+            """
+
+            cursor.execute(query, params)
+            options[filter_key] = [row[0] for row in cursor.fetchall()]
+
+        conn.close()
+
+        return {
+            "success": True,
+            "data": options
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Błąd pobierania dynamicznych opcji filtrów: {str(e)}")
+
+
+@app.get("/api/minimal-stocks/{group_id}")
+async def get_minimal_stock_group(group_id: int):
+    """Pobiera szczegóły grupy wraz z listą produktów"""
+    try:
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM minimal_stock_groups WHERE id = ?", (group_id,))
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Grupa nie znaleziona")
+
+        group = dict(row)
+        filters = {k: v for k, v in group.items() if k.startswith('filter_') or k.startswith('exclude_')}
+        products = get_products_for_group(filters)
+
+        group['products'] = products
+        group['current_stock'] = sum(p.get('Stan', 0) for p in products)
+        group['products_count'] = len(products)
+        group['stock_difference'] = group['current_stock'] - group['min_stock']
+
+        return {
+            "success": True,
+            "data": group
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd pobierania grupy: {str(e)}")
+
+
+@app.post("/api/minimal-stocks")
+async def create_minimal_stock_group(group_data: dict):
+    """Tworzy nową grupę stanów minimalnych"""
+    import json
+    try:
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        cursor = conn.cursor()
+
+        # Konwertuj listy na JSON string
+        def to_json_string(value):
+            if isinstance(value, list):
+                return json.dumps(value) if value else None
+            return value
+
+        cursor.execute("""
+            INSERT INTO minimal_stock_groups
+            (name, min_stock, status, filter_rozmiar, filter_marka, filter_model,
+             filter_plec, filter_rodzaj, filter_uwagi, filter_opis, filter_kolor,
+             filter_sezon, filter_nazwa, filter_przeznaczenie,
+             exclude_rozmiar, exclude_marka, exclude_model, exclude_plec,
+             exclude_rodzaj, exclude_uwagi, exclude_opis, exclude_kolor,
+             exclude_sezon, exclude_nazwa, exclude_przeznaczenie)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            group_data.get('name', 'Nowa grupa'),
+            group_data.get('min_stock', 0),
+            group_data.get('status', 'active'),
+            to_json_string(group_data.get('filter_rozmiar')),
+            to_json_string(group_data.get('filter_marka')),
+            to_json_string(group_data.get('filter_model')),
+            to_json_string(group_data.get('filter_plec')),
+            to_json_string(group_data.get('filter_rodzaj')),
+            to_json_string(group_data.get('filter_uwagi')),
+            to_json_string(group_data.get('filter_opis')),
+            to_json_string(group_data.get('filter_kolor')),
+            to_json_string(group_data.get('filter_sezon')),
+            to_json_string(group_data.get('filter_nazwa')),
+            to_json_string(group_data.get('filter_przeznaczenie')),
+            to_json_string(group_data.get('exclude_rozmiar')),
+            to_json_string(group_data.get('exclude_marka')),
+            to_json_string(group_data.get('exclude_model')),
+            to_json_string(group_data.get('exclude_plec')),
+            to_json_string(group_data.get('exclude_rodzaj')),
+            to_json_string(group_data.get('exclude_uwagi')),
+            to_json_string(group_data.get('exclude_opis')),
+            to_json_string(group_data.get('exclude_kolor')),
+            to_json_string(group_data.get('exclude_sezon')),
+            to_json_string(group_data.get('exclude_nazwa')),
+            to_json_string(group_data.get('exclude_przeznaczenie'))
+        ))
+
+        group_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+
+        return {
+            "success": True,
+            "message": "Grupa utworzona",
+            "id": group_id
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd tworzenia grupy: {str(e)}")
+
+
+@app.put("/api/minimal-stocks/{group_id}")
+async def update_minimal_stock_group(group_id: int, group_data: dict):
+    """Aktualizuje grupę stanów minimalnych"""
+    import json
+    try:
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        cursor = conn.cursor()
+
+        # Konwertuj listy na JSON string
+        def to_json_string(value):
+            if isinstance(value, list):
+                return json.dumps(value) if value else None
+            return value
+
+        cursor.execute("""
+            UPDATE minimal_stock_groups
+            SET name = ?, min_stock = ?, status = ?,
+                filter_rozmiar = ?, filter_marka = ?, filter_model = ?,
+                filter_plec = ?, filter_rodzaj = ?, filter_uwagi = ?,
+                filter_opis = ?, filter_kolor = ?, filter_sezon = ?, filter_nazwa = ?,
+                filter_przeznaczenie = ?,
+                exclude_rozmiar = ?, exclude_marka = ?, exclude_model = ?,
+                exclude_plec = ?, exclude_rodzaj = ?, exclude_uwagi = ?,
+                exclude_opis = ?, exclude_kolor = ?, exclude_sezon = ?, exclude_nazwa = ?,
+                exclude_przeznaczenie = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (
+            group_data.get('name'),
+            group_data.get('min_stock', 0),
+            group_data.get('status', 'active'),
+            to_json_string(group_data.get('filter_rozmiar')),
+            to_json_string(group_data.get('filter_marka')),
+            to_json_string(group_data.get('filter_model')),
+            to_json_string(group_data.get('filter_plec')),
+            to_json_string(group_data.get('filter_rodzaj')),
+            to_json_string(group_data.get('filter_uwagi')),
+            to_json_string(group_data.get('filter_opis')),
+            to_json_string(group_data.get('filter_kolor')),
+            to_json_string(group_data.get('filter_sezon')),
+            to_json_string(group_data.get('filter_nazwa')),
+            to_json_string(group_data.get('filter_przeznaczenie')),
+            to_json_string(group_data.get('exclude_rozmiar')),
+            to_json_string(group_data.get('exclude_marka')),
+            to_json_string(group_data.get('exclude_model')),
+            to_json_string(group_data.get('exclude_plec')),
+            to_json_string(group_data.get('exclude_rodzaj')),
+            to_json_string(group_data.get('exclude_uwagi')),
+            to_json_string(group_data.get('exclude_opis')),
+            to_json_string(group_data.get('exclude_kolor')),
+            to_json_string(group_data.get('exclude_sezon')),
+            to_json_string(group_data.get('exclude_nazwa')),
+            to_json_string(group_data.get('exclude_przeznaczenie')),
+            group_id
+        ))
+
+        affected = cursor.rowcount
+        conn.commit()
+        conn.close()
+
+        if affected == 0:
+            raise HTTPException(status_code=404, detail="Grupa nie znaleziona")
+
+        return {
+            "success": True,
+            "message": "Grupa zaktualizowana"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd aktualizacji grupy: {str(e)}")
+
+
+@app.delete("/api/minimal-stocks/{group_id}")
+async def delete_minimal_stock_group(group_id: int):
+    """Usuwa grupę stanów minimalnych"""
+    try:
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        cursor = conn.cursor()
+
+        cursor.execute("DELETE FROM minimal_stock_groups WHERE id = ?", (group_id,))
+        affected = cursor.rowcount
+        conn.commit()
+        conn.close()
+
+        if affected == 0:
+            raise HTTPException(status_code=404, detail="Grupa nie znaleziona")
+
+        return {
+            "success": True,
+            "message": "Grupa usunięta"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd usuwania grupy: {str(e)}")
 
 
 @app.get("/api/ignored-products")
@@ -4313,6 +5091,246 @@ async def sync_footfall():
         )
 
 
+# =============================================================================
+# SYNCHRONIZACJA PRODUKTÓW Z SQL SERVER DO LOKALNEJ BAZY SQLite
+# =============================================================================
+
+products_sync_lock = threading.Lock()
+
+def sync_products_from_sql_server():
+    """
+    Synchronizuje produkty z SQL Server do lokalnej bazy SQLite.
+    Pobiera wszystkie atrybuty produktów potrzebne do filtrowania grup.
+    Uruchamiana w tle przy starcie i cyklicznie.
+    """
+    if not products_sync_lock.acquire(blocking=False):
+        print("[SYNC-PRODUCTS] Synchronizacja produktów już trwa - pomijam")
+        return False
+
+    try:
+        print("\n" + "="*60)
+        print(f"[SYNC-PRODUCTS] Synchronizacja produktów: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("="*60)
+
+        # Połączenie z SQL Server
+        server = os.getenv('SQL_SERVER', r'10.101.101.5\INSERTGT')
+        database = os.getenv('SQL_DATABASE', 'Sporting_Leszno')
+        username = os.getenv('SQL_USERNAME', 'zestawienia2')
+        password = os.getenv('SQL_PASSWORD', 'GIO38#@oler!!')
+
+        print(f"[SYNC-PRODUCTS] Łączenie z SQL Server: {server}...")
+
+        sql_connection = pyodbc.connect(
+            'DRIVER={ODBC Driver 18 for SQL Server};'
+            f'SERVER={server};'
+            f'DATABASE={database};'
+            f'UID={username};'
+            f'PWD={password};'
+            'TrustServerCertificate=yes;'
+            'Connection Timeout=60;'
+        )
+        sql_cursor = sql_connection.cursor()
+
+        # Pobierz wszystkie produkty z SQL Server z pełnymi atrybutami
+        # Mapowanie kolumn SQL Server na kolumny SQLite:
+        # tw_Symbol -> Symbol
+        # tw_Nazwa -> Nazwa
+        # tw_Pole2 -> Marka
+        # tw_pole1 -> Rozmiar
+        # tw_pole3 -> Model
+        # tw_pole4 -> Sezon
+        # tw_pole5 -> Plec
+        # tw_pole6 -> Kolor
+        # tw_pole7 -> Przeznaczenie
+        # tw_pole8 -> Rodzaj
+        # tw_JM -> JM
+        # tw_Uwagi -> Uwagi
+        # tw_Opis -> Opis
+
+        query = """
+        SELECT
+            tw.tw_Symbol AS Symbol,
+            tw.tw_Nazwa AS Nazwa,
+            tw.tw_Pole2 AS Marka,
+            tw.tw_pole1 AS Rozmiar,
+            tw.tw_pole3 AS Model,
+            tw.tw_pole4 AS Sezon,
+            tw.tw_pole5 AS Plec,
+            tw.tw_pole6 AS Kolor,
+            tw.tw_pole7 AS Przeznaczenie,
+            tw.tw_pole8 AS Rodzaj,
+            'szt' AS JM,
+            '' AS Uwagi,
+            '' AS Opis,
+            COALESCE(sl.sl_Nazwa, '') AS Grupa,
+            tc.tc_CenaNetto1 AS DetalicznaNetto,
+            tc.tc_CenaBrutto1 AS DetalicznaBrutto,
+            vat.vat_Stawka AS StawkaVAT,
+            ISNULL((SELECT SUM(st.st_Stan) FROM tw_Stan st WHERE st.st_TowId = tw.tw_Id AND st.st_MagId IN (1, 7, 9)), 0) AS Stan
+        FROM tw__Towar tw
+        LEFT JOIN sl__Slownik sl ON tw.tw_IdGrupa = sl.sl_Id
+        LEFT JOIN tw_Cena tc ON tw.tw_Id = tc.tc_IdTowar
+        LEFT JOIN sl_StawkaVAT vat ON tw.tw_IdVatSp = vat.vat_Id
+        ORDER BY tw.tw_Symbol
+        """
+
+        print("[SYNC-PRODUCTS] Pobieranie produktów z SQL Server...")
+        sql_cursor.execute(query)
+        rows = sql_cursor.fetchall()
+        sql_connection.close()
+
+        print(f"[SYNC-PRODUCTS] Pobrano {len(rows)} produktów z SQL Server")
+
+        if not rows:
+            print("[SYNC-PRODUCTS] Brak produktów do synchronizacji")
+            return False
+
+        # Zapisz do lokalnej bazy SQLite
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        cursor = conn.cursor()
+
+        # Utwórz tabelę jeśli nie istnieje
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS products (
+                Symbol TEXT PRIMARY KEY,
+                Nazwa TEXT,
+                Stan REAL,
+                JM TEXT,
+                DetalicznaNetto REAL,
+                DetalicznaBrutto REAL,
+                CenaPromocyjna REAL,
+                Opis TEXT,
+                Uwagi TEXT,
+                Model TEXT,
+                Rozmiar TEXT,
+                Marka TEXT,
+                ModelSP TEXT,
+                Sezon TEXT,
+                Plec TEXT,
+                Kolor TEXT,
+                Przeznaczenie TEXT,
+                Rodzaj TEXT,
+                LastUpdated TEXT,
+                LastStanChange TEXT,
+                LastPriceChange TEXT,
+                PreviousStan REAL DEFAULT 0,
+                PreviousPrice REAL DEFAULT 0,
+                IsNew INTEGER DEFAULT 0,
+                CenaZakupuNetto REAL,
+                StawkaVAT REAL,
+                Grupa TEXT
+            )
+        """)
+
+        # Użyj INSERT OR REPLACE do aktualizacji istniejących produktów
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        updated_count = 0
+        for row in rows:
+            symbol = row[0]
+            nazwa = row[1] or ''
+            marka = row[2] or ''
+            rozmiar = row[3] or ''
+            model = row[4] or ''
+            sezon = row[5] or ''
+            plec = row[6] or ''
+            kolor = row[7] or ''
+            przeznaczenie = row[8] or ''
+            rodzaj = row[9] or ''
+            jm = row[10] or 'szt'
+            uwagi = row[11] or ''
+            opis = row[12] or ''
+            grupa = row[13] or ''
+            # Konwertuj Decimal na float dla SQLite
+            detaliczna_netto = float(row[14]) if row[14] else 0.0
+            detaliczna_brutto = float(row[15]) if row[15] else 0.0
+            stawka_vat = float(row[16]) if row[16] else 23.0
+            stan = float(row[17]) if row[17] else 0.0
+
+            cursor.execute("""
+                INSERT OR REPLACE INTO products
+                (Symbol, Nazwa, Marka, Rozmiar, Model, Sezon, Plec, Kolor,
+                 Przeznaczenie, Rodzaj, JM, Uwagi, Opis, Grupa,
+                 DetalicznaNetto, DetalicznaBrutto, StawkaVAT, Stan, LastUpdated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (symbol, nazwa, marka, rozmiar, model, sezon, plec, kolor,
+                  przeznaczenie, rodzaj, jm, uwagi, opis, grupa,
+                  detaliczna_netto, detaliczna_brutto, stawka_vat, stan, now))
+            updated_count += 1
+
+        conn.commit()
+        conn.close()
+
+        print(f"[SYNC-PRODUCTS] Zaktualizowano {updated_count} produktów w lokalnej bazie")
+        print(f"[SYNC-PRODUCTS] Synchronizacja zakończona pomyślnie")
+        return True
+
+    except Exception as e:
+        print(f"[SYNC-PRODUCTS] BŁĄD synchronizacji: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
+    finally:
+        products_sync_lock.release()
+
+
+@app.post("/api/sync-products")
+async def trigger_products_sync():
+    """
+    Endpoint do ręcznego wyzwolenia synchronizacji produktów.
+    Uruchamia synchronizację w tle i zwraca natychmiast.
+    """
+    import threading
+
+    def run_sync():
+        sync_products_from_sql_server()
+
+    threading.Thread(target=run_sync, daemon=True).start()
+
+    return {
+        "success": True,
+        "message": "Synchronizacja produktów została uruchomiona w tle"
+    }
+
+
+@app.get("/api/products-sync-status")
+async def get_products_sync_status():
+    """
+    Sprawdza status synchronizacji produktów.
+    """
+    try:
+        conn = sqlite3.connect(str(DATABASE_FILE))
+        cursor = conn.cursor()
+
+        # Sprawdź ile produktów jest w bazie
+        cursor.execute("SELECT COUNT(*) FROM products")
+        total_count = cursor.fetchone()[0]
+
+        # Sprawdź ile produktów ma wypełnione pole Rodzaj
+        cursor.execute("SELECT COUNT(*) FROM products WHERE Rodzaj IS NOT NULL AND Rodzaj != ''")
+        with_rodzaj = cursor.fetchone()[0]
+
+        # Sprawdź ostatnią aktualizację
+        cursor.execute("SELECT MAX(LastUpdated) FROM products")
+        last_updated = cursor.fetchone()[0]
+
+        conn.close()
+
+        return {
+            "success": True,
+            "data": {
+                "total_products": total_count,
+                "with_rodzaj": with_rodzaj,
+                "last_updated": last_updated
+            }
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
 if __name__ == "__main__":
     import uvicorn
     import sys
@@ -4363,6 +5381,15 @@ if __name__ == "__main__":
         replace_existing=True
     )
 
+    # Synchronizacja produktów z SQL Server co 30 minut
+    scheduler.add_job(
+        sync_products_from_sql_server,
+        trigger=IntervalTrigger(minutes=30),
+        id='products_sync_job',
+        name='Synchronizacja produktów z SQL Server co 30 minut',
+        replace_existing=True
+    )
+
     # Początkowa synchronizacja planów sprzedaży przy starcie
     print("\n[SYNC] Synchronizacja planów sprzedaży przy starcie...")
     sync_sales_plans_from_google()
@@ -4372,11 +5399,16 @@ if __name__ == "__main__":
     import threading
     threading.Thread(target=refresh_footfall_background, daemon=True).start()
 
+    # Początkowa synchronizacja produktów przy starcie (w tle, nie blokuje)
+    print("[SYNC] Rozpoczynam synchronizację produktów z SQL Server w tle...")
+    threading.Thread(target=sync_products_from_sql_server, daemon=True).start()
+
     scheduler.start()
     print(f"\n[OK] Zaplanowano automatyczną synchronizację danych co 1 godzinę")
     print(f"[OK] Zaplanowano automatyczną synchronizację planów sprzedaży co 30 minut")
     print(f"[OK] Zaplanowano odświeżanie cache co 5 minut")
     print(f"[OK] Zaplanowano odświeżanie footfall w tle co 5 minut")
+    print(f"[OK] Zaplanowano synchronizację produktów z SQL Server co 30 minut")
 
     print("\n" + "="*60)
     print(f"URUCHAMIANIE SERWERA API")

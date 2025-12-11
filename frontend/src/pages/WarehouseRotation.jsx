@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react'
-import { DollarSign, Package, TrendingUp, TrendingDown, AlertTriangle, RefreshCw, ChevronDown, ChevronUp, HelpCircle, X, Clock } from 'lucide-react'
+import { DollarSign, Package, TrendingUp, TrendingDown, AlertTriangle, RefreshCw, ChevronDown, ChevronUp, HelpCircle, X, Clock, RotateCcw } from 'lucide-react'
 import { BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import { API_BASE_URL } from '../config/api'
+import { useResizableColumns } from '../hooks/useResizableColumns'
 
 // Cache helpers
 const CACHE_KEY = 'warehouseRotation_cache';
@@ -28,6 +29,12 @@ function WarehouseRotation() {
   }));
   const [expandedCategories, setExpandedCategories] = useState(['DEAD', 'VERY_SLOW', 'SLOW']);
   const [showHelp, setShowHelp] = useState(false);
+
+  // Resizable columns
+  const { getColumnStyle, ResizeHandle, resetWidths } = useResizableColumns({
+    symbol: 100, nazwa: 200, marka: 80, stan: 60,
+    wartosc: 100, dniBezRuchu: 80, dataDostawy: 100
+  }, 'warehouseRotation_columns', 50);
 
   useEffect(() => {
     fetchRotationData();
@@ -379,16 +386,47 @@ function WarehouseRotation() {
                         Top 10 produktów według wartości:
                       </h4>
                       <div className="overflow-x-auto">
-                        <table className="min-w-full divide-y divide-gray-200">
+                        <div className="flex justify-end mb-2">
+                          <button
+                            onClick={resetWidths}
+                            className="flex items-center gap-1 px-2 py-1 text-xs text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded"
+                            title="Resetuj szerokość kolumn"
+                          >
+                            <RotateCcw size={12} />
+                            Reset kolumn
+                          </button>
+                        </div>
+                        <table className="min-w-full divide-y divide-gray-200 table-fixed">
                           <thead className="bg-gray-100">
                             <tr>
-                              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Symbol</th>
-                              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Nazwa</th>
-                              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Marka</th>
-                              <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Stan</th>
-                              <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Wartość</th>
-                              <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Dni bez ruchu</th>
-                              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Data dostawy</th>
+                              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase relative" style={getColumnStyle('symbol')}>
+                                Symbol
+                                <ResizeHandle columnKey="symbol" />
+                              </th>
+                              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase relative" style={getColumnStyle('nazwa')}>
+                                Nazwa
+                                <ResizeHandle columnKey="nazwa" />
+                              </th>
+                              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase relative" style={getColumnStyle('marka')}>
+                                Marka
+                                <ResizeHandle columnKey="marka" />
+                              </th>
+                              <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase relative" style={getColumnStyle('stan')}>
+                                Stan
+                                <ResizeHandle columnKey="stan" />
+                              </th>
+                              <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase relative" style={getColumnStyle('wartosc')}>
+                                Wartość
+                                <ResizeHandle columnKey="wartosc" />
+                              </th>
+                              <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase relative" style={getColumnStyle('dniBezRuchu')}>
+                                Dni bez ruchu
+                                <ResizeHandle columnKey="dniBezRuchu" />
+                              </th>
+                              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase relative" style={getColumnStyle('dataDostawy')}>
+                                Data dostawy
+                                <ResizeHandle columnKey="dataDostawy" />
+                              </th>
                             </tr>
                           </thead>
                           <tbody className="bg-white divide-y divide-gray-200">
